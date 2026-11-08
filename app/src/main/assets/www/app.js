@@ -1,0 +1,1861 @@
+'use strict';
+// Bilancio on the phone. The ledger is indexed by its folders: dati/<persona>/<portafoglio>/<anno>.csv, each
+// portfolio with a portafoglio.json saying whether it counts euro or bitcoin. The web app reads the same files
+// and Syncthing carries every change to the PC and the Pi. Nothing here needs a network except the BTC price.
+
+const A = window.Archivio;
+
+const COLONNE = {
+    fiat: ['id', 'data', 'importo', 'persona', 'conto', 'tipologia', 'categoria', 'descrizione'],
+    bitcoin: ['id', 'data', 'euro', 'bitcoin', 'prezzo', 'persona', 'conto', 'descrizione'],
+};
+const VALUTA = { EUR: 'fiat', BTC: 'bitcoin' };
+const ANNO_CSV = /^\d{4}\.csv$/;
+const MESI = ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+
+const S = {
+    portafogli: new Map(), // 'Alan/BBVA' -> { persona, nome, cartella, valuta, tipo }
+    file: {},              // 'Alan/BBVA/2026.csv' -> { mtime, size, conto, persona, tipo, righe }
+    conflitti: [],
+    vecchioFormato: false,
+    tab: 'movimenti',
+    mese: oggi().slice(0, 7),
+    anno: Number(oggi().slice(0, 4)),
+    persona: '',
+    conto: '',
+    cerca: '',
+    vistaCat: 'mese',
+    catAperta: '',
+    vistaMov: 'lista',
+    calScala: 'mese',
+    calSettimana: '',
+    btcPeriodo: 'mese',
+    btcScelto: '',
+    calColore: 'persona',
+    calGiorno: '',
+    bolPeriodo: 'mese',
+    bolTipo: '',
+    bolScelto: '',
+    foglio: null,
+    prezzo: leggiLocale('bilancio.prezzo', null),
+};
+const pref = {
+    get io() { return leggiLocale('bilancio.io', ''); },
+    set io(v) { scriviLocale('bilancio.io', v); },
+    get unita() { return leggiLocale('bilancio.unita', 'BTC'); },
+    set unita(v) { scriviLocale('bilancio.unita', v); },
+};
+
+// ---------- small helpers ----------
+
+function oggi() {
+    return giorno(new Date());
+}
+function giorno(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function leggiLocale(k, def) {
+    try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch { return def; }
+}
+function scriviLocale(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* nothing to remember then */ }
+}
+function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function euro(n, segno = false) {
+    const s = Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${n < 0 ? '−' : segno && n > 0 ? '+' : ''}€ ${s}`;
+}
+function euroTondo(n) {
+    return `${n < 0 ? '−' : ''}€ ${Math.round(Math.abs(n)).toLocaleString('it-IT')}`;
+}
+function btc(n) {
+    if (pref.unita === 'SAT') return `${Math.round(n * 1e8).toLocaleString('it-IT')} sat`;
+    return `${n.toLocaleString('it-IT', { minimumFractionDigits: 8, maximumFractionDigits: 8 })} BTC`;
+}
+// Accepts "12,50", "12.50", "1.234,56", "1,234.56", "-€ 3,00", "12.34 EUR".
+function numero(s) {
+    let t = String(s ?? '').trim().replace(/[^\d,.\-+]/g, '');
+    const v = t.lastIndexOf(','), p = t.lastIndexOf('.');
+    if (v >= 0 && p >= 0) t = v > p ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, '');
+    else if (v >= 0) t = t.replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : NaN;
+}
+function nuovoId() {
+    const b = new Uint8Array(4);
+    crypto.getRandomValues(b);
+    return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function nomeMese(ym) {
+    const [y, m] = ym.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString('it-IT', { month: 'long', year: 'numeric' });
+}
+function spostaMese(ym, d) {
+    const [y, m] = ym.split('-').map(Number);
+    const t = new Date(y, m - 1 + d, 1);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`;
+}
+function perUso(valori) {
+    const n = new Map();
+    for (const v of valori) if (v) n.set(v, (n.get(v) || 0) + 1);
+    return [...n.entries()].sort((a, b) => b[1] - a[1]).map(([v]) => v);
+}
+function avvisa(testo) {
+    const el = document.getElementById('avviso');
+    el.textContent = testo;
+    el.hidden = false;
+    clearTimeout(avvisa.t);
+    avvisa.t = setTimeout(() => { el.hidden = true; }, 3500);
+}
+
+// ---------- CSV, the same shape the web app writes ----------
+
+function righeCSV(testo, sep = ',') {
+    const righe = [];
+    let riga = [], campo = '', virgolette = false;
+    for (let i = 0; i < testo.length; i++) {
+        const c = testo[i];
+        if (virgolette) {
+            if (c === '"' && testo[i + 1] === '"') { campo += '"'; i++; }
+            else if (c === '"') virgolette = false;
+            else campo += c;
+        } else if (c === '"') virgolette = true;
+        else if (c === sep) { riga.push(campo); campo = ''; }
+        else if (c === '\n' || c === '\r') {
+            if (c === '\r' && testo[i + 1] === '\n') i++;
+            riga.push(campo); campo = '';
+            if (riga.length > 1 || riga[0] !== '') righe.push(riga);
+            riga = [];
+        } else campo += c;
+    }
+    if (campo !== '' || riga.length) { riga.push(campo); righe.push(riga); }
+    return righe;
+}
+
+function daCSV(p, testo) {
+    const [testa, ...corpo] = righeCSV((testo || '').replace(/^﻿/, ''));
+    if (!testa) return [];
+    return corpo.map(r => {
+        const o = Object.fromEntries(testa.map((k, i) => [k, r[i] ?? '']));
+        return {
+            tipo: p.tipo, conto: p.nome, persona: p.persona, id: o.id || nuovoId(), data: o.data,
+            importo: p.tipo === 'fiat' ? Number(o.importo) || 0 : 0,
+            tipologia: o.tipologia || '', categoria: o.categoria || '', descrizione: o.descrizione || '',
+            euro: p.tipo === 'bitcoin' ? Number(o.euro) || 0 : 0,
+            bitcoin: p.tipo === 'bitcoin' ? Number(o.bitcoin) || 0 : 0,
+            prezzo: o.prezzo ? Number(o.prezzo) : null,
+        };
+    });
+}
+
+function cella(v) {
+    const s = v == null ? '' : String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function aCSV(tipo, righe) {
+    const valore = (m, k) => {
+        if (k === 'importo' || k === 'euro') return m[k].toFixed(2);
+        if (k === 'bitcoin') return m.bitcoin.toFixed(8);
+        if (k === 'prezzo') return m.prezzo == null ? '' : String(Math.round(m.prezzo * 100) / 100);
+        return m[k];
+    };
+    const ordinate = [...righe].sort((a, b) => a.data.localeCompare(b.data));
+    return [COLONNE[tipo].join(','), ...ordinate.map(m => COLONNE[tipo].map(k => cella(valore(m, k))).join(','))].join('\n') + '\n';
+}
+
+// ---------- portfolios and files ----------
+
+function elenco(sub) {
+    try { return JSON.parse(A.elenco(sub) || '[]'); } catch { return []; }
+}
+
+function carica() {
+    const conflitti = [];
+    const portafogli = new Map();
+    const presenti = new Set();
+    const radice = elenco('');
+    for (const d of radice) {
+        if (d.nome.includes('sync-conflict')) conflitti.push(d.nome);
+        if (!d.dir) continue;
+        for (const c of elenco(d.nome)) {
+            if (!c.dir) continue;
+            const cartella = `${d.nome}/${c.nome}`;
+            const figli = elenco(cartella);
+            if (!figli.some(f => f.nome === 'portafoglio.json')) continue;
+            let meta = {};
+            try { meta = JSON.parse(A.leggi(`${cartella}/portafoglio.json`) || '{}'); } catch { meta = {}; }
+            const valuta = meta.valuta === 'BTC' ? 'BTC' : 'EUR';
+            // A bitcoin portfolio is on-chain unless its file says Lightning: the cold wallet is the real account.
+            const rete = valuta === 'BTC' ? (meta.rete === 'LN' ? 'LN' : 'onchain') : null;
+            const p = { persona: d.nome, nome: meta.nome || c.nome, cartella, valuta, tipo: VALUTA[valuta], rete };
+            portafogli.set(`${p.persona}/${p.nome}`, p);
+            for (const f of figli) {
+                if (f.nome.includes('sync-conflict')) conflitti.push(`${cartella}/${f.nome}`);
+                if (!ANNO_CSV.test(f.nome)) continue;
+                const k = `${cartella}/${f.nome}`;
+                presenti.add(k);
+                const x = S.file[k];
+                if (x && x.mtime === f.mtime && x.size === f.size && x.conto === p.nome && x.tipo === p.tipo) continue;
+                S.file[k] = { mtime: f.mtime, size: f.size, conto: p.nome, persona: p.persona, tipo: p.tipo, righe: daCSV(p, A.leggi(k)) };
+            }
+        }
+    }
+    for (const k of Object.keys(S.file)) if (!presenti.has(k)) delete S.file[k];
+    S.portafogli = portafogli;
+    S.conflitti = conflitti;
+    // The layout before portfolios had their own folders; Syncthing may still be bringing the new one.
+    S.vecchioFormato = !portafogli.size && radice.some(d => d.dir && (d.nome === 'fiat' || d.nome === 'bitcoin'));
+}
+
+function tutti(tipo) {
+    return Object.values(S.file).filter(f => f.tipo === tipo).flatMap(f => f.righe);
+}
+
+function portafogliDi(tipo) {
+    return [...S.portafogli.values()].filter(p => p.tipo === tipo);
+}
+
+// Android storage and Windows ignore case, so "Mps" and "MPS" are the same folder: one portfolio.
+function stesso(a, b) {
+    return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+function trovaPortafoglio(persona, nome) {
+    return [...S.portafogli.values()].find(p => stesso(p.persona, persona) && (stesso(p.nome, nome) || stesso(p.cartella.split('/')[1], nome)));
+}
+
+function nomeCartella(s) {
+    return String(s || '').replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
+}
+
+function creaPortafoglio(persona, nome, valuta, rete) {
+    persona = String(persona || '').trim();
+    nome = String(nome || '').trim();
+    if (!persona) throw new Error('Manca la persona');
+    if (!nome) throw new Error('Manca il nome del portafoglio');
+    if (trovaPortafoglio(persona, nome)) throw new Error(`${persona} ha già un portafoglio "${nome}"`);
+    // An existing person folder is reused whatever its case, so "alan" does not start a second Alan.
+    const cp = elenco('').find(d => d.dir && stesso(d.nome, persona))?.nome || nomeCartella(persona);
+    const cn = nomeCartella(nome);
+    if (!cp || !cn) throw new Error('Nome non valido');
+    if (elenco(cp).some(d => stesso(d.nome, cn))) throw new Error(`C'è già una cartella ${cp}/${cn}`);
+    const errore = A.scrivi(`${cp}/${cn}/portafoglio.json`, JSON.stringify(valuta === 'BTC' && rete === 'LN' ? { nome, valuta, rete } : { nome, valuta }, null, 2) + '\n');
+    if (errore) throw new Error(errore);
+    carica();
+    return trovaPortafoglio(cp, nome);
+}
+
+// Every save starts from what is on disk right now, so a year Syncthing just brought in is not overwritten
+// with the copy this screen loaded earlier.
+function cambiaAnno(p, anno, cambia) {
+    carica();
+    const k = `${p.cartella}/${anno}.csv`;
+    const righe = cambia([...(S.file[k]?.righe || [])]).map(m => ({ ...m, conto: p.nome, persona: p.persona }));
+    const errore = A.scrivi(k, aCSV(p.tipo, righe));
+    if (errore) throw new Error(errore);
+    delete S.file[k];
+    carica();
+}
+
+function portafoglioPer(m) {
+    const p = trovaPortafoglio(m.persona, m.conto) || creaPortafoglio(m.persona, m.conto, m.tipo === 'fiat' ? 'EUR' : 'BTC');
+    if (p.tipo !== m.tipo) throw new Error(`"${p.nome}" di ${p.persona} è un portafoglio in ${p.valuta === 'BTC' ? 'bitcoin' : 'euro'}`);
+    return p;
+}
+
+function salvaMovimento(m, vecchio) {
+    const p = portafoglioPer(m);
+    m.conto = p.nome;
+    m.persona = p.persona;
+    const anno = m.data.slice(0, 4);
+    if (vecchio && (vecchio.data.slice(0, 4) !== anno || vecchio.conto !== p.nome || vecchio.persona !== p.persona)) {
+        const pv = trovaPortafoglio(vecchio.persona, vecchio.conto);
+        if (pv) cambiaAnno(pv, vecchio.data.slice(0, 4), r => r.filter(x => x.id !== vecchio.id));
+    }
+    cambiaAnno(p, anno, r => [...r.filter(x => x.id !== m.id), m]);
+}
+
+function eliminaMovimento(m) {
+    cambiaAnno(trovaPortafoglio(m.persona, m.conto), m.data.slice(0, 4), r => r.filter(x => x.id !== m.id));
+}
+
+// ---------- BTC price, the one online thing ----------
+
+async function aggiornaPrezzo() {
+    const prova = async (url, leggi) => {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) throw new Error(r.status);
+        return leggi(await r.json());
+    };
+    try {
+        let eur;
+        try {
+            eur = await prova('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=eur', d => d.bitcoin.eur);
+        } catch {
+            eur = await prova('https://api.kraken.com/0/public/Ticker?pair=XBTEUR', d => parseFloat(d.result.XXBTZEUR.c[0]));
+        }
+        if (!Number.isFinite(eur)) return;
+        S.prezzo = { eur, ts: Date.now() };
+        scriviLocale('bilancio.prezzo', S.prezzo);
+        if (S.tab === 'bitcoin' || S.tab === 'conti') disegna();
+    } catch {
+        // offline: the last price stays, with its date
+    }
+}
+
+// The price on a past day, for valuing sats typed in with that date; one request per day, kept for the session.
+const storico = {};
+async function prezzoDel(data) {
+    if (data === oggi() || !/^\d{4}-\d{2}-\d{2}$/.test(data)) return S.prezzo?.eur ?? null;
+    if (data in storico) return storico[data];
+    storico[data] = null;
+    try {
+        const ts = Math.floor(new Date(`${data}T12:00:00Z`).getTime() / 1000);
+        const r = await fetch(`https://mempool.space/api/v1/historical-price?currency=EUR&timestamp=${ts}`);
+        const d = await r.json();
+        const eur = Number(d?.prices?.[0]?.EUR);
+        if (eur > 0) storico[data] = eur;
+    } catch {
+        // offline: the form falls back to today's price
+    }
+    return storico[data];
+}
+
+function prezzoNoto(data) {
+    return (data !== oggi() && storico[data]) || S.prezzo?.eur || null;
+}
+
+// The sign typed in the amount decides the direction; the switch above only mirrors it, and tapping it flips the sign.
+function conSegno(testo, uscita) {
+    const t = String(testo || '').trim().replace(/^[-+−]\s*/, '');
+    return uscita && t ? `-${t}` : t;
+}
+
+// ---------- charts ----------
+
+// Month by month running total, from the first movement to this month.
+function cumulataMensile(righe, valore) {
+    if (!righe.length) return [];
+    const perMese = new Map();
+    for (const m of righe) perMese.set(m.data.slice(0, 7), (perMese.get(m.data.slice(0, 7)) || 0) + valore(m));
+    const primo = [...perMese.keys()].sort()[0];
+    const ultimo = oggi().slice(0, 7) > primo ? oggi().slice(0, 7) : primo;
+    const serie = [];
+    let tot = 0;
+    for (let ym = primo; ym <= ultimo; ym = spostaMese(ym, 1)) {
+        tot += perMese.get(ym) || 0;
+        serie.push({ x: ym, y: tot });
+    }
+    return serie;
+}
+
+function etichettaMese(ym) {
+    const [y, m] = ym.split('-');
+    return `${MESI[Number(m) - 1]} ${y.slice(2)}`;
+}
+
+function grafico(titolo, serie, { colore = 'var(--fiat)', formato = euroTondo } = {}) {
+    if (serie.length < 2) return '';
+    const W = 300, H = 110;
+    const ys = serie.map(p => p.y);
+    const min = Math.min(0, ...ys), max = Math.max(0, ...ys);
+    const sy = v => H - ((v - min) / (max - min || 1)) * H;
+    const sx = i => (i / (serie.length - 1)) * W;
+    const linea = serie.map((p, i) => `${i ? 'L' : 'M'}${sx(i).toFixed(1)},${sy(p.y).toFixed(1)}`).join('');
+    const zero = sy(0).toFixed(1);
+    const ultimo = serie[serie.length - 1];
+    // Year boundaries help read a long series.
+    const anni = serie.map((p, i) => (p.x.endsWith('-01') && i ? `<line x1="${sx(i).toFixed(1)}" x2="${sx(i).toFixed(1)}" y1="0" y2="${H}" class="anno"/>` : '')).join('');
+    return `<div class="scheda grafico">
+        <div class="testa-grafico"><small>${esc(titolo)}</small><strong style="color:${colore}">${formato(ultimo.y)}</strong></div>
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+            ${anni}
+            <line x1="0" x2="${W}" y1="${zero}" y2="${zero}" class="zero"/>
+            <path d="${linea}L${W},${zero}L0,${zero}Z" fill="${colore}" opacity="0.15"/>
+            <path d="${linea}" fill="none" stroke="${colore}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+        </svg>
+        <div class="piede-grafico"><span>${etichettaMese(serie[0].x)}</span><span>max ${formato(max)}</span><span>${etichettaMese(ultimo.x)}</span></div>
+    </div>`;
+}
+
+// ---------- views ----------
+
+function filtroPersona(m) {
+    return !S.persona || m.persona === S.persona;
+}
+
+// A wallet picked on the bitcoin side must not empty the euro views (and the other way round), where no chip shows it.
+function filtroConto(m) {
+    return !S.conto || m.conto === S.conto || !portafogliDi(m.tipo).some(p => p.nome === S.conto);
+}
+
+function persone() {
+    return perUso([...tutti('fiat'), ...tutti('bitcoin')].map(m => m.persona));
+}
+
+function chipsPersone(btcStile = false) {
+    const lista = persone();
+    if (lista.length < 2) return '';
+    const c = btcStile ? ' btc' : '';
+    return `<div class="chips">
+        <button class="chip${c}${S.persona ? '' : ' attivo'}" data-az="persona" data-val="">Tutti</button>
+        ${lista.map(p => `<button class="chip${c}${S.persona === p ? ' attivo' : ''}" data-az="persona" data-val="${esc(p)}">${esc(p)}</button>`).join('')}
+    </div>`;
+}
+
+function filtroContoAttivo(tipo) {
+    if (!S.conto || !portafogliDi(tipo).some(p => p.nome === S.conto)) return '';
+    return `<div class="chips"><button class="chip attivo${tipo === 'bitcoin' ? ' btc' : ''}" data-az="conto" data-val="">${esc(S.conto)} ✕</button></div>`;
+}
+
+function vistaMovimenti() {
+    const fiat = tutti('fiat').filter(filtroPersona).filter(filtroConto);
+    const q = S.cerca.trim().toLowerCase();
+    const elenco = (q
+        ? fiat.filter(m => `${m.descrizione} ${m.tipologia} ${m.categoria} ${m.conto}`.toLowerCase().includes(q))
+        : fiat.filter(m => m.data.startsWith(S.mese))
+    ).sort((a, b) => b.data.localeCompare(a.data));
+    const entrate = elenco.filter(m => m.importo > 0).reduce((s, m) => s + m.importo, 0);
+    const uscite = elenco.filter(m => m.importo < 0).reduce((s, m) => s + m.importo, 0);
+    const sospese = fiat.filter(daClassificare).length;
+
+    let righe = '';
+    let giorno = '';
+    const mostrate = elenco.slice(0, 400);
+    for (const m of mostrate) {
+        if (m.data !== giorno) {
+            giorno = m.data;
+            const tot = elenco.filter(x => x.data === giorno).reduce((s, x) => s + x.importo, 0);
+            const etichetta = new Date(`${giorno}T12:00:00`).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', ...(q ? { year: 'numeric' } : {}) });
+            righe += `<div class="giorno"><span>${etichetta}</span><span>${euro(tot)}</span></div>`;
+        }
+        righe += voce(m);
+    }
+    if (elenco.length > mostrate.length) righe += `<p class="vuoto">Altri ${elenco.length - mostrate.length} movimenti: restringi la ricerca.</p>`;
+
+    const vista = q ? 'lista' : S.vistaMov;
+    const r = vista === 'riepilogo' ? riepilogo() : null;
+    return `
+        ${q ? '' : `<div class="segmenti pieni">
+            <button class="${vista === 'lista' ? 'attivo' : ''}" data-az="vista-mov" data-val="lista">☰ Lista</button>
+            <button class="${vista === 'calendario' ? 'attivo' : ''}" data-az="vista-mov" data-val="calendario">▦ Calendario</button>
+            <button class="${vista === 'riepilogo' ? 'attivo' : ''}" data-az="vista-mov" data-val="riepilogo">▤ Riepilogo</button>
+        </div>`}
+        ${r ? r.testa : `${q ? '' : `<div class="navigatore">
+            <button data-az="mese" data-val="-1" aria-label="Mese precedente">‹</button>
+            <b>${nomeMese(S.mese)}</b>
+            <button data-az="mese" data-val="1" aria-label="Mese successivo">›</button>
+        </div>`}
+        <div class="riassunto">
+            <div class="scheda"><small>Entrate</small><strong class="positivo">${euro(entrate)}</strong></div>
+            <div class="scheda"><small>Uscite</small><strong class="negativo">${euro(-uscite)}</strong></div>
+            <div class="scheda"><small>Saldo</small><strong class="${entrate + uscite < 0 ? 'negativo' : 'positivo'}">${euro(entrate + uscite, true)}</strong></div>
+        </div>`}
+        <input class="cerca" type="search" placeholder="Cerca in tutti i movimenti…" value="${esc(S.cerca)}" data-campo="cerca">
+        ${filtroContoAttivo('fiat')}
+        ${chipsPersone()}
+        ${sospese ? `<button class="avviso-regole" data-az="regole">${sospese} movimenti da classificare · crea regole ›</button>` : ''}
+        ${r ? r.corpo : vista === 'calendario' ? calendario(elenco) : righe || `<p class="vuoto">${q ? 'Nessun movimento trovato.' : 'Nessun movimento in questo mese.<br>Tocca + per aggiungerne uno.'}</p>`}
+    `;
+}
+
+const COLORI = ['#3b82f6', '#f59e0b', '#ec4899', '#a855f7', '#22c55e', '#f97316', '#06b6d4', '#eab308', '#6366f1', '#f43f5e', '#84cc16', '#94a3b8'];
+
+// Colours follow how often a name is used across all the data, so a category keeps its colour from month to month.
+function coloreDi(campo) {
+    const nomi = perUso(tutti('fiat').map(m => m[campo] || '—'));
+    const mappa = Object.fromEntries(nomi.map((n, i) => [n, COLORI[i % COLORI.length]]));
+    return n => mappa[n || '—'] || 'var(--tenue)';
+}
+
+function spostaGiorni(d, n) {
+    const x = new Date(`${d}T12:00:00`); x.setDate(x.getDate() + n); return giorno(x);
+}
+function lunediDi(d) {
+    const x = new Date(`${d}T12:00:00`); return spostaGiorni(d, -((x.getDay() + 6) % 7));
+}
+// The week to open on: this week when looking at the current month, otherwise the month's first week.
+function oggiNelMese() {
+    return oggi().startsWith(S.mese) ? oggi() : `${S.mese}-01`;
+}
+
+function settimana(colore, campo) {
+    const inizio = lunediDi(S.calSettimana || oggiNelMese());
+    S.calSettimana = inizio;
+    const fiat = tutti('fiat').filter(filtroPersona).filter(filtroConto);
+    const giorni = Array.from({ length: 7 }, (_, i) => spostaGiorni(inizio, i));
+    const fine = giorni[6];
+    const delle = fiat.filter(m => m.data >= inizio && m.data <= fine);
+    const netto = delle.reduce((t, m) => t + m.importo, 0);
+    const fmt = d => new Date(`${d}T12:00:00`).toLocaleDateString('it-IT', { day: 'numeric', month: 'short' });
+    const adesso = oggi();
+    const righe = giorni.map(d => {
+        const sue = delle.filter(m => m.data === d).sort((a, b) => a.importo - b.importo);
+        const n = sue.reduce((t, m) => t + m.importo, 0);
+        const segno = !sue.length ? '' : n > 0 ? ' entra' : n < 0 ? ' esce' : '';
+        return `<div class="giorno-sett${segno}${d === adesso ? ' oggi' : ''}">
+            <div class="giorno"><span>${new Date(`${d}T12:00:00`).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric' })}</span><span>${sue.length ? euro(n, true) : ''}</span></div>
+            ${sue.map(m => `<div class="striscia" style="--c:${colore(m[campo])}">${voce(m)}</div>`).join('') || '<p class="nota vuota">—</p>'}
+        </div>`;
+    }).join('');
+    return `<div class="navigatore">
+            <button data-az="cal-settimana" data-val="-1" aria-label="Settimana precedente">‹</button>
+            <b>${fmt(inizio)} – ${fmt(fine)}</b>
+            <button data-az="cal-settimana" data-val="1" aria-label="Settimana successiva">›</button>
+        </div>
+        <p class="nota" style="text-align:center;margin-top:0">Saldo della settimana <b class="${netto < 0 ? 'negativo' : 'positivo'}">${euro(netto, true)}</b></p>
+        ${righe}`;
+}
+
+function calendario(elenco) {
+    const campo = S.calColore === 'categoria' ? 'categoria' : 'persona';
+    const colore = coloreDi(campo);
+    const scale = `<div class="segmenti pieni due">
+            <button class="${S.calScala === 'mese' ? 'attivo' : ''}" data-az="cal-scala" data-val="mese">Mese</button>
+            <button class="${S.calScala === 'settimana' ? 'attivo' : ''}" data-az="cal-scala" data-val="settimana">Settimana</button>
+        </div>`;
+    const sceltaColori = `<div class="chips">
+            <span class="nota" style="align-self:center;margin:0">Colori per</span>
+            <button class="chip${campo === 'persona' ? ' attivo' : ''}" data-az="cal-colore" data-val="persona">Persona</button>
+            <button class="chip${campo === 'categoria' ? ' attivo' : ''}" data-az="cal-colore" data-val="categoria">Categoria</button>
+        </div>`;
+    if (S.calScala === 'settimana') return scale + sceltaColori + settimana(colore, campo);
+    const perGiorno = new Map();
+    for (const m of elenco) (perGiorno.get(m.data) || perGiorno.set(m.data, []).get(m.data)).push(m);
+    const [y, mm] = S.mese.split('-').map(Number);
+    const giorni = new Date(y, mm, 0).getDate();
+    const vuoti = (new Date(y, mm - 1, 1).getDay() + 6) % 7; // weeks start on Monday
+    const scelto = S.calGiorno.startsWith(S.mese) ? S.calGiorno : [...perGiorno.keys()].sort().pop() || '';
+    const adesso = oggi();
+    let celle = '<i></i>'.repeat(vuoti);
+    for (let d = 1; d <= giorni; d++) {
+        const data = `${S.mese}-${String(d).padStart(2, '0')}`;
+        const sue = perGiorno.get(data) || [];
+        const netto = sue.reduce((t, m) => t + m.importo, 0);
+        const punti = sue.slice(0, 6).map(m => `<b style="background:${colore(m[campo])}"></b>`).join('') + (sue.length > 6 ? '<em>+</em>' : '');
+        const segno = !sue.length ? '' : netto > 0 ? ' entra' : netto < 0 ? ' esce' : '';
+        celle += `<button class="cella${segno}${data === scelto ? ' scelta' : ''}${data === adesso ? ' oggi' : ''}" data-az="cal-giorno" data-val="${data}">
+            <span class="num">${d}</span><span class="punti">${punti}</span>
+            ${sue.length ? `<span class="netto">${netto > 0 ? '+' : netto < 0 ? '−' : ''}${Math.round(Math.abs(netto))}</span>` : ''}
+        </button>`;
+    }
+    const usati = perUso(elenco.map(m => m[campo] || '—'));
+    const delGiorno = (perGiorno.get(scelto) || []);
+    const etichetta = scelto ? new Date(`${scelto}T12:00:00`).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' }) : '';
+    return `
+        ${scale}
+        ${sceltaColori}
+        <div class="scheda calendario">
+            ${['L', 'M', 'M', 'G', 'V', 'S', 'D'].map(g => `<span class="intesta">${g}</span>`).join('')}
+            ${celle}
+        </div>
+        <div class="legenda">${usati.map(n => `<span><i style="background:${colore(n)}"></i>${esc(n)}</span>`).join('')}
+            <span><i style="background:var(--entrata)"></i>entrate</span><span><i style="background:var(--uscita)"></i>uscite</span></div>
+        ${scelto ? `<div class="giorno"><span>${etichetta}</span><span>${euro(delGiorno.reduce((t, m) => t + m.importo, 0))}</span></div>
+            ${delGiorno.map(voce).join('') || '<p class="vuoto">Nessun movimento in questo giorno.</p>'}` : '<p class="vuoto">Nessun movimento in questo mese.</p>'}
+    `;
+}
+
+function torta(fette, centro) {
+    const tot = fette.reduce((t, f) => t + f.valore, 0);
+    if (tot <= 0) return '';
+    const R = 42, C = 2 * Math.PI * R;
+    let fatto = 0;
+    const archi = fette.filter(f => f.valore > 0).map(f => {
+        const l = (f.valore / tot) * C;
+        const a = `<circle r="${R}" cx="50" cy="50" fill="none" stroke="${f.colore}" stroke-width="14" stroke-dasharray="${l} ${C - l}" stroke-dashoffset="${-fatto}"/>`;
+        fatto += l;
+        return a;
+    }).join('');
+    return `<div class="scheda torta">
+        <svg viewBox="0 0 100 100"><g transform="rotate(-90 50 50)">${archi}</g>
+            <text x="50" y="47" text-anchor="middle" class="t-piccolo">${esc(centro[0])}</text>
+            <text x="50" y="58" text-anchor="middle" class="t-grande">${esc(centro[1])}</text></svg>
+        <div class="voci-torta">${fette.map(f => `<div><i style="background:${f.colore}"></i><span>${esc(f.nome)}</span>
+            <b>${f.valore > 0 ? Math.round((f.valore / tot) * 100) : 0}%</b><small>${f.testo}</small></div>`).join('')}</div>
+    </div>`;
+}
+
+// Each band's area, not its height, is its share: in a triangle the area above a line grows with the square of its depth.
+// The biggest fund is the base and the smallest the tip, so the shape says at once where the money sits.
+function piramide(fondi) {
+    const strati = fondi.filter(f => f.valore > 0).sort((a, b) => a.valore - b.valore);
+    const tot = strati.reduce((t, f) => t + f.valore, 0);
+    if (strati.length < 2) return '';
+    const [cima, base, cx, mezza] = [2, 74, 34, 33];
+    const larghezza = y => (mezza * (y - cima)) / (base - cima);
+    let somma = 0, sopra = cima, ultima = -Infinity;
+    const pezzi = strati.map(f => {
+        somma += f.valore;
+        const sotto = cima + (base - cima) * Math.sqrt(somma / tot);
+        const [a, b] = [larghezza(sopra), larghezza(sotto)];
+        const forma = `<polygon points="${cx - a},${sopra} ${cx + a},${sopra} ${cx + b},${sotto} ${cx - b},${sotto}" fill="${f.colore}"/>`;
+        const ym = (sopra + sotto) / 2;
+        // Labels keep apart even when the tip is a sliver.
+        const yt = Math.max(ym, ultima + 12);
+        ultima = yt;
+        sopra = sotto;
+        const quota = (f.valore / tot) * 100;
+        return { forma, ym, yt, x: cx + larghezza(ym), f, quota };
+    });
+    const sposta = Math.max(0, ultima - (base - 2));
+    const etichette = pezzi.map(({ ym, yt, x, f, quota }) => {
+        const y = yt - sposta;
+        return `<polyline points="${x + 1},${ym} ${x + 4},${ym} ${70},${y}" fill="none" stroke="var(--bordo)" stroke-width="0.4"/>
+            <text x="72" y="${y - 1}" class="p-nome">${esc(f.nome)} <tspan class="p-quota">${quota < 1 ? quota.toFixed(1).replace('.', ',') : Math.round(quota)}%</tspan></text>
+            <text x="72" y="${y + 4.2}" class="p-valore">${esc(euroTondo(f.valore))}${f.testo ? ` · ${esc(f.testo)}` : ''}</text>`;
+    }).join('');
+    return `<div class="scheda piramide"><small>Piramide dei fondi</small>
+        <svg viewBox="0 0 130 78">${pezzi.map(x => x.forma).join('')}${etichette}</svg></div>`;
+}
+
+function voce(m) {
+    const iniziale = (m.tipologia || m.categoria || '?').slice(0, 2);
+    const sotto = [m.tipologia, m.conto, persone().length > 1 ? m.persona : ''].filter(Boolean).join(' · ');
+    return `<button class="voce" data-az="apri" data-id="${esc(m.id)}" data-tipo="fiat">
+        <span class="pallino">${esc(iniziale)}</span>
+        <span class="testo"><span class="titolo">${esc(m.descrizione || m.tipologia || 'Movimento')}</span><span class="sotto">${esc(sotto)}</span></span>
+        <span class="cifra ${m.importo < 0 ? '' : 'positivo'}">${euro(m.importo, true)}</span>
+    </button>`;
+}
+
+function riepilogo() {
+    const fiat = tutti('fiat').filter(filtroPersona).filter(filtroConto);
+    const anno = String(S.anno);
+    const dellAnno = fiat.filter(m => m.data.startsWith(anno));
+    const entrate = dellAnno.filter(m => m.importo > 0).reduce((s, m) => s + m.importo, 0);
+    const uscite = -dellAnno.filter(m => m.importo < 0).reduce((s, m) => s + m.importo, 0);
+
+    const mesi = MESI.map((nome, i) => {
+        const ym = `${anno}-${String(i + 1).padStart(2, '0')}`;
+        const del = dellAnno.filter(m => m.data.startsWith(ym));
+        return {
+            ym, nome,
+            e: del.filter(m => m.importo > 0).reduce((s, m) => s + m.importo, 0),
+            u: -del.filter(m => m.importo < 0).reduce((s, m) => s + m.importo, 0),
+        };
+    });
+    const max = Math.max(1, ...mesi.flatMap(m => [m.e, m.u]));
+    const barre = mesi.map(m => `<button class="mese${m.ym === S.mese ? ' scelto' : ''}" data-az="scegli-mese" data-val="${m.ym}">
+        <div class="coppia"><i class="e" style="height:${(m.e / max) * 100}%"></i><i class="u" style="height:${(m.u / max) * 100}%"></i></div>
+        <span>${m.nome}</span></button>`).join('');
+
+    const periodo = S.vistaCat === 'mese' && S.mese.startsWith(anno) ? S.mese : anno;
+    const spese = fiat.filter(m => m.importo < 0 && m.data.startsWith(periodo));
+    const totSpese = -spese.reduce((s, m) => s + m.importo, 0);
+    const perCat = new Map();
+    for (const m of spese) {
+        const c = m.categoria || m.tipologia || 'Altro';
+        const g = perCat.get(c) || { tot: 0, tip: new Map() };
+        g.tot -= m.importo;
+        const t = m.tipologia || '—';
+        g.tip.set(t, (g.tip.get(t) || 0) - m.importo);
+        perCat.set(c, g);
+    }
+    const ordinate = [...perCat.entries()].sort((a, b) => b[1].tot - a[1].tot);
+    const maxCat = ordinate[0]?.[1].tot || 1;
+    const categorie = ordinate.map(([c, g]) => {
+        const aperta = S.catAperta === c;
+        const tip = aperta ? `<div class="sottocat">${[...g.tip.entries()].sort((a, b) => b[1] - a[1]).map(([t, v]) => `
+            <div class="riga-cat"><div class="nome"><span>${esc(t)}</span><span>${euro(v)}</span></div>
+            <div class="barra"><i style="width:${(v / g.tot) * 100}%"></i></div></div>`).join('')}</div>` : '';
+        return `<button class="riga-cat" data-az="cat" data-val="${esc(c)}">
+            <div class="nome"><span>${aperta ? '▾' : '▸'} ${esc(c)}</span><span>${euro(g.tot)} <small style="color:var(--tenue)">${Math.round((g.tot / totSpese) * 100)}%</small></span></div>
+            <div class="barra"><i style="width:${(g.tot / maxCat) * 100}%"></i></div>
+        </button>${tip}`;
+    }).join('');
+
+    // Monthly savings this year, a running total: whether the year is ending ahead or behind.
+    const risparmioAnno = [];
+    let r = 0;
+    for (const m of mesi) {
+        if (m.ym > oggi().slice(0, 7)) break;
+        r += m.e - m.u;
+        risparmioAnno.push({ x: m.ym, y: r });
+    }
+
+    const testa = `
+        <div class="navigatore">
+            <button data-az="anno" data-val="-1" aria-label="Anno precedente">‹</button>
+            <b>${anno}</b>
+            <button data-az="anno" data-val="1" aria-label="Anno successivo">›</button>
+        </div>
+        <div class="riassunto">
+            <div class="scheda"><small>Entrate</small><strong class="positivo">${euro(entrate)}</strong></div>
+            <div class="scheda"><small>Uscite</small><strong class="negativo">${euro(uscite)}</strong></div>
+            <div class="scheda"><small>Risparmio</small><strong class="${entrate - uscite < 0 ? 'negativo' : 'positivo'}">${euro(entrate - uscite, true)}</strong></div>
+        </div>`;
+    const corpo = `
+        <div class="scheda"><div class="barre">${barre}</div></div>
+        ${grafico(`Risparmio accumulato nel ${anno}`, risparmioAnno, { colore: 'var(--entrata)' })}
+        ${grafico('Saldo dei movimenti, dal primo', cumulataMensile(fiat, m => m.importo))}
+        <div class="sezione">
+            <span>Spese per categoria · ${periodo === anno ? anno : nomeMese(periodo)}</span>
+            <span class="segmenti">
+                <button class="${S.vistaCat === 'mese' ? 'attivo' : ''}" data-az="vista-cat" data-val="mese">Mese</button>
+                <button class="${S.vistaCat === 'anno' ? 'attivo' : ''}" data-az="vista-cat" data-val="anno">Anno</button>
+            </span>
+        </div>
+        ${categorie || '<p class="vuoto">Nessuna spesa in questo periodo.</p>'}
+    `;
+    return { testa, corpo };
+}
+
+// One bubble per period: its area is the euro spent, its height the average price paid, its colour how far today's
+// price is from it. The orange ring is what the same coins are worth today, on the same scale.
+function grafoBolle(acquisti, p, medio) {
+    if (!acquisti.length) return '';
+    const per = S.btcPeriodo;
+    const gruppi = new Map();
+    for (const m of acquisti) {
+        const k = chiavePeriodo(m.data, per);
+        const g = gruppi.get(k) || { k, euro: 0, btc: 0, primo: m.data, ultimo: m.data };
+        g.euro += m.euro; g.btc += m.bitcoin;
+        if (m.data < g.primo) g.primo = m.data;
+        if (m.data > g.ultimo) g.ultimo = m.data;
+        gruppi.set(k, g);
+    }
+    const lista = [...gruppi.values()].sort((a, b) => a.k.localeCompare(b.k));
+    for (const g of lista) { g.prezzo = g.euro / g.btc; g.oggi = p ? g.btc * p : null; g.pct = p ? (p / g.prezzo - 1) * 100 : null; }
+    const W = 340, H = 230, mx = 10, alto = 14, basso = 22;
+    const t = d => new Date(`${d}T12:00:00`).getTime();
+    const x0 = t(lista[0].primo), x1 = Math.max(t(lista.at(-1).ultimo), x0 + 864e5);
+    const prezzi = [...lista.map(g => g.prezzo), ...(p ? [p] : []), medio];
+    let y0 = Math.min(...prezzi), y1 = Math.max(...prezzi);
+    const pad = (y1 - y0) * 0.12 || y1 * 0.1;
+    y0 = Math.max(0, y0 - pad); y1 += pad;
+    const X = g => mx + 18 + ((t(g.primo) + t(g.ultimo)) / 2 - x0) / (x1 - x0) * (W - 2 * mx - 36);
+    const Y = v => alto + (1 - (v - y0) / (y1 - y0)) * (H - alto - basso);
+    const maxV = Math.max(...lista.map(g => Math.max(g.euro, g.oggi || 0)));
+    const rMax = Math.min(26, 220 / Math.sqrt(lista.length + 4));
+    const R = v => Math.max(2.2, Math.sqrt(v / maxV) * rMax);
+    const colorePct = pct => pct === null ? 'var(--fiat)' : pct >= 0 ? 'var(--entrata)' : 'var(--uscita)';
+    const scelto = gruppi.get(S.btcScelto);
+    const bolle = lista.map(g => `<g data-az="btc-scegli" data-val="${g.k}" class="bolla${g === scelto ? ' scelta' : ''}">
+        ${g.oggi ? `<circle cx="${X(g)}" cy="${Y(g.prezzo)}" r="${R(g.oggi)}" class="anello"/>` : ''}
+        <circle cx="${X(g)}" cy="${Y(g.prezzo)}" r="${R(g.euro)}" fill="${colorePct(g.pct)}" class="pieno"/>
+    </g>`).join('');
+    const linea = (v, cls, testo) => `<line x1="0" x2="${W}" y1="${Y(v)}" y2="${Y(v)}" class="${cls}"/><text x="${W - 2}" y="${Y(v) - 3}" text-anchor="end" class="t-linea ${cls}">${testo}</text>`;
+    const anni = [];
+    for (let a = Number(lista[0].primo.slice(0, 4)) + 1; a <= Number(lista.at(-1).ultimo.slice(0, 4)); a++) {
+        const xa = mx + 18 + (t(`${a}-01-01`) - x0) / (x1 - x0) * (W - 2 * mx - 36);
+        anni.push(`<line x1="${xa}" x2="${xa}" y1="${alto}" y2="${H - basso}" class="anno"/><text x="${xa}" y="${H - 6}" text-anchor="middle" class="t-asse">${a}</text>`);
+    }
+    const k = n => `${Math.round(n / 1000)}k`;
+    const tot = lista.reduce((a, g) => ({ euro: a.euro + g.euro, oggi: a.oggi + (g.oggi || 0) }), { euro: 0, oggi: 0 });
+    const dett = scelto || null;
+    const riga = g => `<b>${esc(etichettaPeriodo(g.k, per))}</b> · investiti ${euro(g.euro)} a € ${Math.round(g.prezzo).toLocaleString('it-IT')} · ${btc(g.btc)}${g.oggi !== null ? ` · oggi ${euro(g.oggi)} <b class="${g.pct < 0 ? 'negativo' : 'positivo'}">${g.pct >= 0 ? '+' : ''}${Math.round(g.pct)}%</b>` : ''}`;
+    const perAnno = new Map();
+    for (const g of lista) {
+        const a = g.primo.slice(0, 4), x = perAnno.get(a) || { euro: 0, btc: 0 };
+        x.euro += g.euro; x.btc += g.btc; perAnno.set(a, x);
+    }
+    const tabella = [...perAnno].sort().reverse().map(([a, x]) => {
+        const oggi = p ? x.btc * p : null, roi = oggi !== null ? (oggi / x.euro - 1) * 100 : null;
+        return `<tr><td>${a}</td><td>${euroTondo(x.euro)}</td><td>${oggi !== null ? euroTondo(oggi) : '—'}</td><td class="${roi === null ? '' : roi < 0 ? 'negativo' : 'positivo'}">${roi === null ? '—' : `${roi >= 0 ? '+' : ''}${Math.round(roi)}%`}</td></tr>`;
+    }).join('');
+    return `<div class="scheda grafico bolle">
+        <div class="testa-grafico"><small>Acquisti: quanto e a che prezzo</small>
+            <strong class="${tot.oggi && tot.oggi < tot.euro ? 'negativo' : 'positivo'}">${p ? `${tot.oggi >= tot.euro ? '+' : ''}${Math.round((tot.oggi / tot.euro - 1) * 100)}%` : ''}</strong></div>
+        <svg viewBox="0 0 ${W} ${H}">
+            ${anni.join('')}
+            <text x="2" y="${alto + 8}" class="t-asse">€ ${k(y1)}</text><text x="2" y="${H - basso - 2}" class="t-asse">€ ${k(y0)}</text>
+            ${linea(medio, 'pareggio', `medio € ${k(medio)}`)}
+            ${p ? linea(p, 'attuale', `oggi € ${k(p)}`) : ''}
+            ${bolle}
+        </svg>
+        <p class="nota dett-bolla">${dett ? riga(dett) : 'Tocca una bolla. Grandezza = euro investiti, anello arancio = valore oggi, verde/rosso = sopra o sotto il prezzo di oggi.'}</p>
+        <table class="roi"><thead><tr><th>Anno</th><th>Investito</th><th>Oggi</th><th>ROI</th></tr></thead><tbody>${tabella}</tbody></table>
+    </div>`;
+}
+
+// Sats gained or spent in each period, not added up: early months with cheap coins show as the tall bars they were.
+function barreSats(tx) {
+    const per = S.btcPeriodo;
+    const somme = new Map();
+    for (const m of tx) { const k = chiavePeriodo(m.data, per); somme.set(k, (somme.get(k) || 0) + m.bitcoin); }
+    if (!somme.size) return '';
+    const chiavi = [...somme.keys()].sort();
+    let elenco = [];
+    for (let k = chiavi[0]; k <= chiavi.at(-1); k = seguente(k, per)) elenco.push(k);
+    elenco = elenco.slice(-({ mese: 36, trimestre: 16, anno: 12 }[per]));
+    const max = Math.max(1e-8, ...elenco.map(k => Math.abs(somme.get(k) || 0)));
+    const ciSonoUscite = elenco.some(k => (somme.get(k) || 0) < 0);
+    const W = 340, H = 120, zero = ciSonoUscite ? H * 0.62 : H - 2, scala = ciSonoUscite ? Math.max(zero, H - zero) : zero;
+    const lw = W / elenco.length;
+    const barre = elenco.map((k, i) => {
+        const v = somme.get(k) || 0, h = Math.abs(v) / max * (scala - 4);
+        return `<rect x="${i * lw + lw * 0.15}" y="${v >= 0 ? zero - h : zero}" width="${lw * 0.7}" height="${Math.max(h, v ? 1 : 0)}" fill="${v >= 0 ? 'var(--btc)' : 'var(--uscita)'}" rx="1.5"/>`;
+    }).join('');
+    const tot = elenco.reduce((a, k) => a + (somme.get(k) || 0), 0);
+    return `<div class="scheda grafico">
+        <div class="testa-grafico"><small>Sats per ${per === 'mese' ? 'mese' : per === 'trimestre' ? 'trimestre' : 'anno'}</small><strong class="arancio">${btc(tot)}</strong></div>
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${barre}<line x1="0" x2="${W}" y1="${zero}" y2="${zero}" class="zero"/></svg>
+        <div class="piede-grafico"><span>${esc(etichettaPeriodo(elenco[0], per))}</span><span>max ${btc(max)}</span><span>${esc(etichettaPeriodo(elenco.at(-1), per))}</span></div>
+    </div>`;
+}
+
+function vistaBitcoin() {
+    const tx = tutti('bitcoin').filter(filtroPersona).filter(filtroConto).sort((a, b) => b.data.localeCompare(a.data));
+    const detenuti = tx.reduce((s, m) => s + m.bitcoin, 0);
+    const suLN = m => trovaPortafoglio(m.persona, m.conto)?.rete === 'LN';
+    const ln = tx.filter(suLN).reduce((s, m) => s + m.bitcoin, 0);
+    const onchain = detenuti - ln;
+    const netti = tx.reduce((s, m) => s + m.euro, 0);
+    // A purchase is euro turned into on-chain bitcoin; sats received on Lightning are payments, not buys.
+    const acquisti = tx.filter(m => m.bitcoin > 0 && m.euro > 0 && !suLN(m));
+    const btcComprati = acquisti.reduce((s, m) => s + m.bitcoin, 0);
+    // Total euro over total bitcoin: each purchase weighs as much as it cost.
+    const medio = btcComprati > 0 ? acquisti.reduce((s, m) => s + m.euro, 0) / btcComprati : 0;
+    const p = S.prezzo?.eur;
+    const valore = p ? detenuti * p : null;
+    const guadagno = valore !== null ? valore - netti : null;
+    const quando = S.prezzo ? new Date(S.prezzo.ts) : null;
+    const etichettaPrezzo = !quando ? 'Prezzo non ancora scaricato'
+        : Date.now() - S.prezzo.ts < 10 * 60 * 1000 ? `aggiornato alle ${quando.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })}`
+        : `ultimo prezzo del ${quando.toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
+
+    const perPersona = perUso(tutti('bitcoin').map(m => m.persona)).map(nome => {
+        const b = tutti('bitcoin').filter(m => m.persona === nome).filter(filtroConto).reduce((s, m) => s + m.bitcoin, 0);
+        return `<div class="riga-cat"><div class="nome"><span>${esc(nome)}</span><span>${btc(b)}</span></div></div>`;
+    }).join('');
+
+    const lista = tx.slice(0, 300).map(m => `<button class="voce" data-az="apri" data-id="${esc(m.id)}" data-tipo="bitcoin">
+        <span class="pallino" style="color:var(--btc)">₿</span>
+        <span class="testo"><span class="titolo">${btc(m.bitcoin)}</span>
+        <span class="sotto">${new Date(`${m.data}T12:00:00`).toLocaleDateString('it-IT')} · ${esc(m.persona)}${portafogliDi('bitcoin').length > 1 ? ` · ${esc(m.conto)}` : ''}${m.prezzo ? ` · € ${Math.round(m.prezzo).toLocaleString('it-IT')}/BTC` : ''}</span></span>
+        <span class="cifra">${euro(m.euro)}</span>
+    </button>`).join('');
+
+    const visibili = [...S.portafogli.values()].filter(x => x.tipo === 'bitcoin' && (!S.persona || x.persona === S.persona) && (!S.conto || x.nome === S.conto));
+    const portLN = visibili.filter(x => x.rete === 'LN');
+    const portOn = visibili.filter(x => x.rete !== 'LN');
+    const titolare = (S.persona || pref.io || '').toUpperCase();
+    // Each wallet's own balance on the card, hiding the emptied ones as Conti does.
+    const carta = (classe, titolo, saldo, wallet) => `<div class="carta ${classe}">
+            <div class="carta-testa"><span>${titolo}</span><i class="carta-chip"></i></div>
+            <strong>${btc(saldo)}</strong>
+            <span class="carta-euro">${p ? `≈ ${euro(saldo * p)}` : '&nbsp;'}</span>
+            <div class="carta-piede">
+                <span>${esc(titolare)}</span>
+                <span class="carta-wallet">${wallet.map(x => [x, tutti('bitcoin').filter(m => m.persona === x.persona && m.conto === x.nome).reduce((s, m) => s + m.bitcoin, 0)])
+                    .filter(([, b]) => Math.abs(b) >= 5e-9).sort((a, b) => b[1] - a[1])
+                    .map(([x, b]) => `<button data-az="apri-conto" data-val="${esc(x.nome)}" data-persona="${esc(x.persona)}">${esc(x.nome)} ${btc(b)}</button>`).join('')}</span>
+            </div>
+        </div>`;
+
+    return `
+        <div class="totale-btc">
+            <small>Saldo totale</small>
+            <strong>${btc(detenuti)}</strong>
+            <span>${valore !== null ? `≈ ${euro(valore)}` : ''}</span>
+        </div>
+        ${portOn.length || !portLN.length ? carta('onchain', '₿ Onchain', onchain, portOn) : ''}
+        ${portLN.length ? carta('ln', '⚡ Lightning', ln, portLN) : ''}
+        <div class="griglia2">
+            <div class="scheda"><small>Investiti</small><strong>${euro(netti)}</strong></div>
+            <div class="scheda"><small>Guadagno</small><strong class="${guadagno === null ? '' : guadagno < 0 ? 'negativo' : 'positivo'}">${guadagno === null ? '—' : `${euro(guadagno, true)}${netti > 0 ? ` (${Math.round((guadagno / netti) * 100)}%)` : ''}`}</strong></div>
+            <div class="scheda"><small>Prezzo medio</small><strong>${medio ? `€ ${Math.round(medio).toLocaleString('it-IT')}` : '—'}</strong></div>
+            <button class="scheda" data-az="prezzo" style="text-align:left"><small>Prezzo ↻</small><strong>${p ? `€ ${Math.round(p).toLocaleString('it-IT')}` : '—'}</strong></button>
+        </div>
+        <p class="nota">${etichettaPrezzo}</p>
+        ${filtroContoAttivo('bitcoin')}
+        ${chipsPersone(true)}
+        <div class="segmenti pieni">
+            ${[['mese', 'Mese'], ['trimestre', 'Trimestre'], ['anno', 'Anno']].map(([k, n]) => `<button class="${S.btcPeriodo === k ? 'attivo' : ''}" data-az="btc-periodo" data-val="${k}">${n}</button>`).join('')}
+        </div>
+        ${grafoBolle(acquisti, p, medio)}
+        ${barreSats(tx)}
+        ${!S.persona && perPersona ? `<div class="sezione"><span>Per persona</span></div><div class="scheda">${perPersona}</div>` : ''}
+        <div class="sezione"><span>Movimenti</span></div>
+        ${lista || '<p class="vuoto">Nessun acquisto. Tocca + per aggiungerne uno.</p>'}
+    `;
+}
+
+function vistaConti() {
+    const saldi = p => {
+        const r = tutti(p.tipo).filter(m => m.conto === p.nome && m.persona === p.persona);
+        return { p, saldo: r.reduce((s, m) => s + (p.tipo === 'fiat' ? m.importo : m.bitcoin), 0), n: r.length, ultimo: r.reduce((u, m) => (m.data > u ? m.data : u), '') };
+    };
+    const tutteRighe = [...S.portafogli.values()].map(saldi);
+    const maxEur = Math.max(1, ...tutteRighe.filter(x => x.p.tipo === 'fiat').map(x => Math.abs(x.saldo)));
+    const maxBtc = Math.max(1e-8, ...tutteRighe.filter(x => x.p.tipo === 'bitcoin').map(x => Math.abs(x.saldo)));
+    // Closed accounts stay on disk with their history but would only clutter the list.
+    const aZero = x => Math.abs(x.saldo) < (x.p.tipo === 'fiat' ? 0.005 : 5e-9);
+    const azzerati = tutteRighe.filter(x => (!S.persona || x.p.persona === S.persona) && aZero(x)).length;
+    const chi = perUso(tutteRighe.flatMap(x => Array(x.n + 1).fill(x.p.persona))).filter(c => !S.persona || c === S.persona);
+    const blocchi = chi.map(persona => {
+        const sue = tutteRighe.filter(x => x.p.persona === persona && (S.mostraZero || !aZero(x))).sort((a, b) => (a.p.tipo === b.p.tipo ? Math.abs(b.saldo) - Math.abs(a.saldo) : a.p.tipo === 'fiat' ? -1 : 1));
+        const totEur = sue.filter(x => x.p.tipo === 'fiat').reduce((s, x) => s + x.saldo, 0);
+        const totBtc = sue.filter(x => x.p.tipo === 'bitcoin').reduce((s, x) => s + x.saldo, 0);
+        return `<div class="sezione"><span>${esc(persona)}</span><span>${euro(totEur)}${totBtc ? ` · ${btc(totBtc)}` : ''}</span></div>
+        ${sue.map(({ p, saldo, n, ultimo }) => `<button class="riga-cat conto" data-az="apri-conto" data-val="${esc(p.nome)}" data-persona="${esc(p.persona)}">
+            <div class="nome"><span>${p.tipo === 'bitcoin' ? `<b class="arancio">${p.rete === 'LN' ? '⚡' : '₿'}</b> ` : ''}${esc(p.nome)}</span><span class="${saldo < 0 ? 'negativo' : ''}">${p.tipo === 'fiat' ? euro(saldo) : btc(saldo)}</span></div>
+            <div class="barra"><i style="width:${(Math.abs(saldo) / (p.tipo === 'fiat' ? maxEur : maxBtc)) * 100}%;background:${saldo < 0 ? 'var(--uscita)' : p.tipo === 'fiat' ? 'var(--fiat)' : 'var(--btc)'}"></i></div>
+            <small>${n} movimenti${ultimo ? ` · ultimo ${new Date(`${ultimo}T12:00:00`).toLocaleDateString('it-IT')}` : ''} · <code>${esc(p.cartella)}</code></small>
+        </button>`).join('')}`;
+    }).join('');
+    // Euro against bitcoin at today's price: only what is actually held, so an overdrawn account counts as nothing.
+    const mie = tutteRighe.filter(x => !S.persona || x.p.persona === S.persona);
+    const eur = mie.filter(x => x.p.tipo === 'fiat').reduce((t, x) => t + Math.max(0, x.saldo), 0);
+    const onc = mie.filter(x => x.p.tipo === 'bitcoin' && x.p.rete !== 'LN').reduce((t, x) => t + Math.max(0, x.saldo), 0);
+    const lnb = mie.filter(x => x.p.rete === 'LN').reduce((t, x) => t + Math.max(0, x.saldo), 0);
+    const prezzo = S.prezzo?.eur;
+    const fette = prezzo ? [
+        { nome: 'Fiat', valore: eur, colore: 'var(--fiat)', testo: euroTondo(eur) },
+        { nome: 'Bitcoin', valore: (onc + lnb) * prezzo, colore: 'var(--btc)', testo: `${euroTondo((onc + lnb) * prezzo)} · ${btc(onc + lnb)}` },
+    ] : [];
+    const patrimonio = fette.reduce((t, f) => t + f.valore, 0);
+    const bloccoTorta = prezzo ? torta(fette, ['Patrimonio', euroTondo(patrimonio)]) + piramide([
+        { nome: '⚡ Lightning', valore: lnb * prezzo, colore: '#facc15', testo: btc(lnb) },
+        { nome: '€ Fiat', valore: eur, colore: 'var(--fiat)', testo: '' },
+        { nome: '₿ Onchain', valore: onc * prezzo, colore: 'var(--btc)', testo: btc(onc) },
+    ])
+        : (onc + lnb ? '<button class="bottone secondario" data-az="prezzo" style="margin-bottom:0.75rem">Scarica il prezzo BTC per il grafico euro/bitcoin</button>' : '');
+
+    return `
+        ${bloccoTorta}
+        <p class="nota">Ogni portafoglio è la cartella <b>dati/Persona/Portafoglio</b>, con un file per anno. Il saldo è la somma dei movimenti registrati, non quello della banca.</p>
+        ${chipsPersone()}
+        ${blocchi || '<p class="vuoto">Nessun portafoglio.</p>'}
+        <div class="affiancati" style="margin-top:1.25rem">
+            <button class="bottone secondario" data-az="nuovo-portafoglio">+ Portafoglio</button>
+            ${azzerati ? `<button class="bottone secondario" data-az="mostra-zero">${S.mostraZero ? 'Nascondi' : 'Mostra'} ${azzerati} a zero</button>` : ''}
+            <button class="bottone secondario" data-az="importa">Importa…</button>
+        </div>
+    `;
+}
+
+// ---------- bills ----------
+
+// A bill is any type that starts with "Bolletta": a new one (Bolletta Internet) shows up by itself.
+const BOLLETTA = /^bollett[ae]\b/i;
+const COLORI_BOLLETTE = ['#f97316', '#ec4899', '#10b981', '#14b8a6', '#6366f1'];
+const COLORE_BOLLETTA = { acqua: '#38bdf8', rifiuti: '#9ca3af', energia: '#facc15', luce: '#facc15', gas: '#a855f7' };
+
+function nomeBolletta(tipologia) {
+    return tipologia.replace(BOLLETTA, '').trim() || 'Altre';
+}
+
+function chiavePeriodo(data, per) {
+    if (per === 'anno') return data.slice(0, 4);
+    if (per === 'trimestre') return `${data.slice(0, 4)}-T${Math.floor((Number(data.slice(5, 7)) - 1) / 3) + 1}`;
+    return data.slice(0, 7);
+}
+
+function etichettaPeriodo(k, per, corta = false) {
+    if (per === 'anno') return corta ? `'${k.slice(2)}` : k;
+    if (per === 'trimestre') return corta ? `${k.slice(5)} ${k.slice(2, 4)}` : `${k.slice(5)} ${k.slice(0, 4)}`;
+    return corta ? MESI[Number(k.slice(5)) - 1].slice(0, 1).toUpperCase() : nomeMese(k);
+}
+
+function seguente(k, per) {
+    if (per === 'anno') return String(Number(k) + 1);
+    if (per === 'trimestre') {
+        const [y, t] = [Number(k.slice(0, 4)), Number(k.slice(6))];
+        return t === 4 ? `${y + 1}-T1` : `${y}-T${t + 1}`;
+    }
+    return spostaMese(k, 1);
+}
+
+function vistaBollette() {
+    const tutte = tutti('fiat').filter(m => BOLLETTA.test(m.tipologia)).filter(filtroPersona);
+    const tipi = perUso(tutte.map(m => nomeBolletta(m.tipologia)));
+    const colore = Object.fromEntries(tipi.map((t, i) => [t, COLORE_BOLLETTA[t.toLowerCase()] || COLORI_BOLLETTE[i % COLORI_BOLLETTE.length]]));
+    if (S.bolTipo && !tipi.includes(S.bolTipo)) S.bolTipo = '';
+    const scelte = tutte.filter(m => !S.bolTipo || nomeBolletta(m.tipologia) === S.bolTipo);
+    const per = S.bolPeriodo;
+    // A refund comes in as a positive amount and lowers that bill.
+    const costo = m => -m.importo;
+
+    const somme = new Map();
+    for (const m of scelte) {
+        const k = chiavePeriodo(m.data, per);
+        const g = somme.get(k) || {};
+        const t = nomeBolletta(m.tipologia);
+        g[t] = (g[t] || 0) + costo(m);
+        somme.set(k, g);
+    }
+    const adesso = chiavePeriodo(oggi(), per);
+    const primo = [...somme.keys()].sort()[0] || adesso;
+    let elenco = [];
+    for (let k = primo; k <= adesso; k = seguente(k, per)) elenco.push(k);
+    elenco = elenco.slice(-({ mese: 24, trimestre: 12, anno: 10 }[per]));
+    const tot = k => Object.values(somme.get(k) || {}).reduce((a, b) => a + b, 0);
+    const max = Math.max(1, ...elenco.map(tot));
+    if (!elenco.includes(S.bolScelto)) S.bolScelto = '';
+    const scelto = S.bolScelto || [...elenco].reverse().find(k => tot(k) > 0) || adesso;
+
+    const colonne = elenco.map(k => {
+        const g = somme.get(k) || {};
+        const pezzi = tipi.filter(t => g[t] > 0).map(t => `<i style="height:${(g[t] / max) * 100}%;background:${colore[t]}"></i>`).join('');
+        // January carries the year instead of its initial, so a long run of months stays readable.
+        const etichetta = per === 'mese' && k.endsWith('-01') ? `<b>${k.slice(2, 4)}</b>` : etichettaPeriodo(k, per, true);
+        return `<button class="colonna${k === scelto ? ' scelta' : ''}" data-az="bol-scegli" data-val="${k}">
+            <div class="pila">${pezzi}</div><span>${etichetta}</span></button>`;
+    }).join('');
+
+    const dettaglio = somme.get(scelto) || {};
+    const righeDettaglio = tipi.filter(t => dettaglio[t]).map(t => `<span><i style="background:${colore[t]}"></i>${esc(t)} ${euro(dettaglio[t])}</span>`).join('');
+
+    // The last twelve months against the twelve before, so seasons do not fool the comparison.
+    const daMese = d => { const x = new Date(`${oggi().slice(0, 7)}-01T12:00:00`); x.setMonth(x.getMonth() - d); return giorno(x).slice(0, 7); };
+    const ultimi = scelte.filter(m => m.data.slice(0, 7) > daMese(12)).reduce((a, m) => a + costo(m), 0);
+    const prima = scelte.filter(m => m.data.slice(0, 7) > daMese(24) && m.data.slice(0, 7) <= daMese(12)).reduce((a, m) => a + costo(m), 0);
+    const delta = prima > 0 ? Math.round(((ultimi - prima) / prima) * 100) : null;
+
+    const schede = tipi.map(t => {
+        const sue = tutte.filter(m => nomeBolletta(m.tipologia) === t);
+        const anno12 = sue.filter(m => m.data.slice(0, 7) > daMese(12));
+        const ultima = [...sue].sort((a, b) => b.data.localeCompare(a.data))[0];
+        const tot12 = anno12.reduce((a, m) => a + costo(m), 0);
+        return `<button class="riga-cat conto" data-az="bol-tipo" data-val="${esc(t)}">
+            <div class="nome"><span><i class="pallino-bol" style="background:${colore[t]}"></i>${esc(t)}</span><span>${euroTondo(tot12)}</span></div>
+            <small>${euroTondo(tot12 / 12)}/mese · ${anno12.length} in 12 mesi${ultima ? ` · ultima ${new Date(`${ultima.data}T12:00:00`).toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: '2-digit' })} ${euroTondo(costo(ultima))}` : ''}</small>
+        </button>`;
+    }).join('');
+
+    const lista = S.bolTipo ? [...scelte].sort((a, b) => b.data.localeCompare(a.data)).slice(0, 60).map(voce).join('') : '';
+
+    return `
+        <div class="segmenti pieni">
+            ${[['mese', 'Mese'], ['trimestre', 'Trimestre'], ['anno', 'Anno']].map(([k, n]) => `<button class="${per === k ? 'attivo' : ''}" data-az="bol-periodo" data-val="${k}">${n}</button>`).join('')}
+        </div>
+        <div class="chips">
+            <button class="chip${S.bolTipo ? '' : ' attivo'}" data-az="bol-tipo" data-val="">Tutte</button>
+            ${tipi.map(t => `<button class="chip${S.bolTipo === t ? ' attivo' : ''}" data-az="bol-tipo" data-val="${esc(t)}" style="${S.bolTipo === t ? `background:${colore[t]};border-color:${colore[t]};color:#111` : ''}">${esc(t)}</button>`).join('')}
+        </div>
+        <div class="riassunto">
+            <div class="scheda"><small>Ultimi 12 mesi</small><strong>${euroTondo(ultimi)}</strong></div>
+            <div class="scheda"><small>Al mese</small><strong>${euroTondo(ultimi / 12)}</strong></div>
+            <div class="scheda"><small>Vs anno prima</small><strong class="${delta === null ? '' : delta > 0 ? 'negativo' : 'positivo'}">${delta === null ? '—' : `${delta > 0 ? '+' : ''}${delta}%`}</strong></div>
+        </div>
+        ${tutte.length ? `<div class="scheda">
+            <div class="testa-grafico"><small>${esc(etichettaPeriodo(scelto, per))}</small><strong>${euro(tot(scelto))}</strong></div>
+            <div class="colonne">${colonne}</div>
+            ${!S.bolTipo && righeDettaglio ? `<div class="legenda">${righeDettaglio}</div>` : ''}
+        </div>` : '<p class="vuoto">Nessuna bolletta: sono le uscite con tipologia che inizia per "Bolletta".</p>'}
+        ${chipsPersone()}
+        ${S.bolTipo ? `<div class="sezione"><span>Pagamenti ${esc(S.bolTipo)}</span></div>${lista}` : `<div class="sezione"><span>Per bolletta</span></div>${schede}`}
+    `;
+}
+
+function vistaBenvenuto() {
+    const permesso = A.permesso();
+    const cartella = A.cartella();
+    const trovati = cartella && permesso ? tutti('fiat').length + tutti('bitcoin').length : 0;
+    const chi = persone();
+    return `<div class="benvenuto">
+        <h1>Bilancio</h1>
+        <p class="nota">I movimenti restano in file CSV sul telefono, nella cartella che Syncthing tiene allineata con il PC e il Raspberry. Funziona anche senza internet.</p>
+        <div class="passo">
+            <h3>${permesso ? '<span class="fatto">✓</span>' : '1.'} Accesso ai file</h3>
+            ${permesso ? '<p class="nota">Concesso.</p>' : `<p class="nota">Serve per leggere e scrivere nella cartella sincronizzata. Nella schermata che si apre, attiva l'interruttore per Bilancio e torna indietro.</p>
+            <button class="bottone" data-az="permesso">Consenti accesso ai file</button>`}
+        </div>
+        <div class="passo">
+            <h3>${cartella && permesso ? '<span class="fatto">✓</span>' : '2.'} Cartella dei dati</h3>
+            <p class="nota">Scegli la cartella <b>dati</b> dentro <b>Casa/Bilancio</b> (va bene anche Bilancio: la trovo io).</p>
+            ${cartella ? `<p class="nota"><code>${esc(cartella)}</code><br>${S.vecchioFormato ? 'Qui i dati sono ancora nel formato vecchio (fiat/ e bitcoin/): aspetta che Syncthing porti quello nuovo.' : trovati ? `${trovati} movimenti in ${S.portafogli.size} portafogli.` : 'Nessun movimento qui: va bene solo se parti da zero.'}</p>` : ''}
+            <button class="bottone ${cartella ? 'secondario' : ''}" data-az="cartella" ${permesso ? '' : 'disabled'}>${cartella ? 'Cambia cartella' : 'Scegli cartella'}</button>
+        </div>
+        ${cartella && permesso ? `<div class="passo">
+            <h3>3. Chi sei?</h3>
+            <p class="nota">Diventa la persona proposta per i nuovi movimenti.</p>
+            <div class="chips">${chi.map(p => `<button class="chip${pref.io === p ? ' attivo' : ''}" data-az="io" data-val="${esc(p)}">${esc(p)}</button>`).join('')}</div>
+            <div class="campo"><input placeholder="Oppure scrivi il nome" data-campo="io" value="${esc(chi.includes(pref.io) ? '' : pref.io)}"></div>
+            <button class="bottone" data-az="inizia" ${pref.io ? '' : 'disabled'}>Inizia</button>
+        </div>` : ''}
+    </div>`;
+}
+
+function pronto() {
+    return A.permesso() && A.cartella() && pref.io && leggiLocale('bilancio.avviato', false);
+}
+
+const TABS = [['movimenti', '€', 'Movimenti'], ['bollette', '⚡', 'Bollette'], ['bitcoin', '₿', 'Bitcoin'], ['conti', '▣', 'Conti']];
+
+function disegna() {
+    const app = document.getElementById('app');
+    if (!pronto()) {
+        app.innerHTML = vistaBenvenuto();
+        return;
+    }
+    const viste = { movimenti: vistaMovimenti, bollette: vistaBollette, bitcoin: vistaBitcoin, conti: vistaConti };
+    const cerca = document.activeElement?.dataset?.campo === 'cerca';
+    const posizione = cerca ? document.activeElement.selectionStart : null;
+    app.innerHTML = `
+        <header class="testata"><button class="icona" data-az="menu" aria-label="Menu">☰</button><h1>${TABS.find(t => t[0] === S.tab)[2]}</h1></header>
+        ${S.conflitti.length ? `<div class="conflitto">⚠ Syncthing ha creato copie in conflitto: i movimenti che contengono non si vedono qui. Uniscile a mano dal PC e cancellale.<br><small>${S.conflitti.map(esc).join(', ')}</small></div>` : ''}
+        ${S.vecchioFormato ? '<div class="conflitto">I dati in questa cartella sono ancora nel formato vecchio (fiat/ e bitcoin/). Aspetta che Syncthing porti le cartelle dei portafogli.</div>' : ''}
+        <main class="contenuto">${viste[S.tab]()}</main>
+        ${S.tab === 'movimenti' || S.tab === 'bitcoin' ? `<button class="fab${S.tab === 'bitcoin' ? ' btc' : ''}" data-az="nuovo" aria-label="Nuovo movimento">+</button>` : ''}
+        <nav class="nav">
+            ${TABS.map(([t, i, n]) => `<button class="${S.tab === t ? 'attivo' : ''}" data-az="tab" data-val="${t}"><b>${i}</b>${n}</button>`).join('')}
+        </nav>`;
+    if (cerca) {
+        const el = app.querySelector('[data-campo=cerca]');
+        el.focus();
+        el.setSelectionRange(posizione, posizione);
+    }
+}
+
+// ---------- sheets ----------
+
+function apriFoglio(f) {
+    S.foglio = f;
+    disegnaFoglio();
+    // autofocus means nothing in markup set through innerHTML
+    if ((f.tipo === 'fiat' || f.tipo === 'bitcoin') && !f.mov) document.querySelector('#foglio [data-campo=importo], #foglio [data-campo=euro]')?.focus();
+}
+
+function chiudiFoglio() {
+    S.foglio = null;
+    document.getElementById('foglio').innerHTML = '';
+}
+
+function trova(tipo, id) {
+    return tutti(tipo).find(m => m.id === id);
+}
+
+function chips(campo, valori, scelto, btcStile = false) {
+    return `<div class="chips">${valori.slice(0, 12).map(v =>
+        `<button type="button" class="chip${btcStile ? ' btc' : ''}${v === scelto ? ' attivo' : ''}" data-az="metti" data-campo="${campo}" data-val="${esc(v)}">${esc(v)}</button>`).join('')}</div>`;
+}
+
+function lista(id, valori) {
+    return `<datalist id="${id}">${valori.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+}
+const datalist = lista;
+
+// Portfolios of one currency, the most used first.
+function nomiPortafogli(tipo, persona) {
+    const uso = perUso(tutti(tipo).filter(m => stesso(m.persona, persona)).slice(-300).map(m => m.conto));
+    const suoi = portafogliDi(tipo).filter(p => stesso(p.persona, persona)).map(p => p.nome);
+    return [...new Set([...uso.filter(n => suoi.includes(n)), ...suoi.sort()])];
+}
+
+function disegnaFoglio() {
+    const f = S.foglio;
+    const el = document.getElementById('foglio');
+    if (!f) { el.innerHTML = ''; return; }
+    const fogli = { menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
+    const forma = f.tipo === 'menu' ? 'pannello cassetto' : f.tipo === 'regole' ? 'pannello pieno' : 'pannello';
+    el.innerHTML = `<div class="velo" data-az="chiudi"></div><div class="${forma}">${f.tipo === 'menu' ? '' : '<div class="maniglia"></div>'}${fogli[f.tipo](f)}</div>`;
+}
+
+function foglioFiat(f) {
+    const m = f.mov;
+    const fiat = tutti('fiat');
+    const io = pref.io;
+    const v = f.bozza || {
+        uscita: m ? m.importo < 0 : false,
+        importo: m ? String(m.importo).replace('.', ',') : '',
+        data: m ? m.data : oggi(),
+        descrizione: m?.descrizione || '',
+        tipologia: m?.tipologia || '',
+        categoria: m?.categoria || '',
+        conto: m ? m.conto : (S.conto && trovaPortafoglio(io, S.conto)?.tipo === 'fiat' ? S.conto : nomiPortafogli('fiat', io)[0] || ''),
+        persona: m ? m.persona : io,
+    };
+    f.bozza = v;
+    const tipologie = perUso(fiat.filter(x => (x.importo < 0) === v.uscita).map(x => x.tipologia));
+    const conti = nomiPortafogli('fiat', v.persona);
+    return `
+        <h2>${m ? 'Modifica movimento' : 'Nuovo movimento'}<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <div class="interruttore">
+            <button type="button" class="u${v.uscita ? ' attivo' : ''}" data-az="verso" data-val="u">Spesa</button>
+            <button type="button" class="e${v.uscita ? '' : ' attivo'}" data-az="verso" data-val="e">Entrata</button>
+        </div>
+        <div class="campo importo"><input data-campo="importo" inputmode="text" placeholder="−12,50 spesa · 12,50 entrata" value="${esc(v.importo)}" autocomplete="off"></div>
+        <div class="campo"><label>Descrizione</label>
+            <input data-campo="descrizione" list="l-descr" value="${esc(v.descrizione)}" placeholder="Es. Spesa Lidl" autocomplete="off">
+            ${lista('l-descr', perUso(fiat.slice(-1500).map(x => x.descrizione)).slice(0, 300))}
+        </div>
+        <div class="campo"><label>Tipologia</label>
+            <input data-campo="tipologia" list="l-tip" value="${esc(v.tipologia)}" autocomplete="off">
+            ${lista('l-tip', tipologie)}${chips('tipologia', tipologie, v.tipologia)}
+            ${v.descrizione.trim() ? `<button type="button" class="collegamento" data-az="regole">＋ Regola: «${esc(v.descrizione.trim().toLowerCase())}» va sempre in questa tipologia</button>` : ''}
+        </div>
+        <div class="affiancati">
+            <div class="campo"><label>Categoria</label>
+                <input data-campo="categoria" list="l-cat" value="${esc(v.categoria)}" autocomplete="off">${lista('l-cat', perUso(fiat.map(x => x.categoria)))}
+            </div>
+            <div class="campo"><label>Data</label><input type="date" data-campo="data" value="${esc(v.data)}"></div>
+        </div>
+        <div class="campo"><label>Portafoglio</label>
+            <input data-campo="conto" list="l-conto" value="${esc(v.conto)}" autocomplete="off">${lista('l-conto', conti)}${chips('conto', conti, v.conto)}
+        </div>
+        <div class="campo"><label>Persona</label>
+            <input data-campo="persona" list="l-pers" value="${esc(v.persona)}" autocomplete="off">${lista('l-pers', persone())}${chips('persona', persone(), v.persona)}
+        </div>
+        ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
+        <button class="bottone" data-az="salva">${m ? 'Salva modifiche' : 'Salva'}</button>
+        ${m ? '<button class="bottone pericolo" data-az="elimina" style="margin-top:0.6rem">Elimina movimento</button>' : ''}
+    `;
+}
+
+// Sats are whole numbers, so dots and spaces in "21.000" are only thousands separators.
+function satsDa(testo) {
+    const t = String(testo || '').trim();
+    const n = Number(t.replace(/[^\d]/g, '') || 0);
+    return /^[-−]/.test(t) ? -n : n;
+}
+
+function testoControvalore(v) {
+    const q = satsDa(v.quanti) / 1e8;
+    const scritti = numero(v.euro);
+    const p = prezzoNoto(v.data);
+    if (scritti > 0 && q) return `Prezzo: € ${Math.round(scritti / Math.abs(q)).toLocaleString('it-IT')} per BTC`;
+    if (!p) return 'Prezzo non disponibile: scrivi gli euro a mano, o salva solo i sats.';
+    const quando = v.data === oggi() || !storico[v.data] ? 'di oggi' : `del ${new Date(`${v.data}T12:00:00`).toLocaleDateString('it-IT')}`;
+    return q ? `≈ ${euro(Math.abs(q) * p)} al prezzo ${quando} (€ ${Math.round(p).toLocaleString('it-IT')}/BTC)` : `Prezzo ${quando}: € ${Math.round(p).toLocaleString('it-IT')}/BTC`;
+}
+
+function aggiornaControvalore() {
+    const el = document.querySelector('[data-prezzo]');
+    if (el && S.foglio?.bozza) el.textContent = testoControvalore(S.foglio.bozza);
+}
+
+function foglioBitcoin(f) {
+    const m = f.mov;
+    const v = f.bozza || {
+        uscita: m ? m.bitcoin < 0 : false,
+        euro: m ? String(Math.abs(m.euro)).replace('.', ',') : '',
+        quanti: m ? String(Math.round(m.bitcoin * 1e8)) : '',
+        data: m ? m.data : oggi(),
+        persona: m ? m.persona : pref.io,
+        conto: m ? m.conto : (S.conto && trovaPortafoglio(pref.io, S.conto)?.tipo === 'bitcoin' ? S.conto : nomiPortafogli('bitcoin', pref.io)[0] || 'Bitcoin'),
+        descrizione: m?.descrizione || '',
+    };
+    f.bozza = v;
+    if (!(v.data in storico)) prezzoDel(v.data).then(() => S.foglio?.tipo === 'bitcoin' && aggiornaControvalore());
+    const conti = nomiPortafogli('bitcoin', v.persona);
+    return `
+        <h2>${m ? 'Modifica' : 'Nuovo'} movimento bitcoin<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <div class="interruttore">
+            <button type="button" class="e${v.uscita ? '' : ' attivo'}" data-az="verso" data-val="e">${trovaPortafoglio(v.persona, v.conto)?.rete === 'LN' ? 'Ricevuti' : 'Acquisto'}</button>
+            <button type="button" class="u${v.uscita ? ' attivo' : ''}" data-az="verso" data-val="u">${trovaPortafoglio(v.persona, v.conto)?.rete === 'LN' ? 'Spesi' : 'Vendita'}</button>
+        </div>
+        <div class="campo importo"><input data-campo="quanti" inputmode="text" placeholder="−21000 spesi · 21000 entrati" value="${esc(v.quanti)}" autocomplete="off"><span class="unita">sat</span></div>
+        <div class="campo"><label>Euro <span class="facoltativo">calcolati da soli, cambiali solo se li sai</span></label><input data-campo="euro" inputmode="decimal" placeholder="—" value="${esc(v.euro)}" autocomplete="off"></div>
+        <p class="nota" data-prezzo>${testoControvalore(v)}</p>
+        <div class="affiancati">
+            <div class="campo"><label>Data</label><input type="date" data-campo="data" value="${esc(v.data)}"></div>
+            <div class="campo"><label>Persona</label><input data-campo="persona" list="l-pers" value="${esc(v.persona)}" autocomplete="off">${lista('l-pers', persone())}</div>
+        </div>
+        ${conti.length !== 1 || conti[0] !== v.conto ? `<div class="campo"><label>Portafoglio</label><input data-campo="conto" list="l-conto" value="${esc(v.conto)}" autocomplete="off">${lista('l-conto', conti)}${chips('conto', conti, v.conto, true)}</div>` : ''}
+        <div class="campo"><label>Descrizione</label><input data-campo="descrizione" value="${esc(v.descrizione)}" placeholder="Es. DCA mensile" autocomplete="off"></div>
+        ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
+        <button class="bottone btc" data-az="salva">${m ? 'Salva modifiche' : 'Salva'}</button>
+        ${m ? '<button class="bottone pericolo" data-az="elimina" style="margin-top:0.6rem">Elimina movimento</button>' : ''}
+    `;
+}
+
+function foglioPortafoglio(f) {
+    const v = f.bozza || (f.bozza = { nome: '', valuta: 'EUR', rete: 'onchain', persona: S.persona || pref.io });
+    return `
+        <h2>Nuovo portafoglio<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <div class="interruttore">
+            <button type="button" class="e${v.valuta === 'EUR' ? ' attivo' : ''}" data-az="valuta" data-val="EUR">€ Euro</button>
+            <button type="button" class="u${v.valuta === 'BTC' ? ' attivo' : ''}" data-az="valuta" data-val="BTC">₿ Bitcoin</button>
+        </div>
+        ${v.valuta === 'BTC' ? `<div class="campo"><label>Rete</label><div class="chips">
+            <button type="button" class="chip btc${v.rete !== 'LN' ? ' attivo' : ''}" data-az="rete" data-val="onchain">₿ Onchain</button>
+            <button type="button" class="chip btc${v.rete === 'LN' ? ' attivo' : ''}" data-az="rete" data-val="LN">⚡ Lightning</button>
+        </div></div>` : ''}
+        <div class="campo"><label>Nome</label><input data-campo="nome" value="${esc(v.nome)}" placeholder="${v.valuta === 'BTC' ? 'Es. Phoenix' : 'Es. Conto Revolut'}" autocomplete="off"></div>
+        <div class="campo"><label>Di chi</label>
+            <input data-campo="persona" list="l-pers" value="${esc(v.persona)}" autocomplete="off">${lista('l-pers', persone())}${chips('persona', persone(), v.persona)}
+        </div>
+        <p class="nota">Diventa la cartella <code>dati/${esc(v.persona.trim() || 'Persona')}/${esc(v.nome.trim() || 'Nome')}</code>, con dentro un file per anno.</p>
+        ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
+        <button class="bottone${v.valuta === 'BTC' ? ' btc' : ''}" data-az="crea-portafoglio">Crea portafoglio</button>
+    `;
+}
+
+function foglioMenu() {
+    const sospese = tutti('fiat').filter(daClassificare).length;
+    return `
+        <h2>Bilancio</h2>
+        <button class="voce-menu" data-az="regole"><b>⇄</b><span>Regole delle categorie<small>${regole().length} regole${sospese ? ` · ${sospese} da classificare` : ''}</small></span></button>
+        <button class="voce-menu" data-az="importa"><b>⇩</b><span>Importa movimenti<small>BBVA, Phoenix, BlueWallet…</small></span></button>
+        <button class="voce-menu" data-az="impostazioni"><b>⚙</b><span>Impostazioni</span></button>
+        <button class="voce-menu" data-az="ricarica"><b>↻</b><span>Rileggi i file</span></button>
+    `;
+}
+
+function foglioImpostazioni() {
+    return `
+        <h2>Impostazioni<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <div class="campo"><label>Chi sei</label>${chips('io', persone(), pref.io)}</div>
+        <div class="campo"><label>Unità bitcoin</label>
+            <div class="chips">
+                <button class="chip btc${pref.unita === 'BTC' ? ' attivo' : ''}" data-az="unita" data-val="BTC">₿ BTC</button>
+                <button class="chip btc${pref.unita === 'SAT' ? ' attivo' : ''}" data-az="unita" data-val="SAT">⚡ sat</button>
+            </div>
+        </div>
+        <div class="campo"><label>Cartella dei dati</label><p class="nota"><code>${esc(A.cartella())}</code></p>
+            <button class="bottone secondario" data-az="cartella">Cambia cartella</button>
+        </div>
+        <button class="bottone secondario" data-az="ricarica">Rileggi i file</button>
+        <p class="nota" style="margin-top:1rem">${tutti('fiat').length} movimenti in euro e ${tutti('bitcoin').length} in bitcoin, in ${S.portafogli.size} portafogli.</p>
+    `;
+}
+
+// ---------- category rules ----------
+
+// Kept next to the data, in dati/regole.json, so every phone and the web app file the same shop the same way.
+const REGOLE = 'regole.json';
+
+function regole() {
+    try { return JSON.parse(A.leggi(REGOLE) || '{}').regole || []; } catch { return []; }
+}
+
+function salvaRegole(lista) {
+    const errore = A.scrivi(REGOLE, JSON.stringify({ regole: lista }, null, 2) + '\n');
+    if (errore) throw new Error(errore);
+}
+
+function daClassificare(m) {
+    return !m.tipologia || stesso(m.tipologia, 'Da classificare');
+}
+
+// The first rule whose text is in the description wins, so a narrower rule goes above a broader one.
+function regolaPer(descrizione, lista = regole()) {
+    const d = String(descrizione || '').toLowerCase();
+    return d ? lista.find(x => x.testo && d.includes(x.testo.toLowerCase())) : undefined;
+}
+
+// A rule without a category files the movement where that type usually goes.
+function categoriaPer(x) {
+    return x.categoria || perUso(tutti('fiat').filter(m => m.tipologia === x.tipologia && !stesso(m.categoria, 'Da classificare')).map(m => m.categoria))[0] || '';
+}
+
+function applicaRegole() {
+    const lista = regole();
+    const daCambiare = tutti('fiat').filter(m => daClassificare(m) && regolaPer(m.descrizione, lista));
+    const gruppi = new Map();
+    for (const m of daCambiare) {
+        const k = `${m.persona}/${m.conto}/${m.data.slice(0, 4)}`;
+        (gruppi.get(k) || gruppi.set(k, []).get(k)).push(m.id);
+    }
+    for (const [k, ids] of gruppi) {
+        const [persona, conto, anno] = [k.slice(0, k.indexOf('/')), k.slice(k.indexOf('/') + 1, k.lastIndexOf('/')), k.slice(k.lastIndexOf('/') + 1)];
+        const quali = new Set(ids);
+        cambiaAnno(trovaPortafoglio(persona, conto), anno, righe => righe.map(m => {
+            if (!quali.has(m.id)) return m;
+            const x = regolaPer(m.descrizione, lista);
+            return { ...m, tipologia: x.tipologia, categoria: categoriaPer(x) };
+        }));
+    }
+    return daCambiare.length;
+}
+
+function foglioRegole(f) {
+    const v = f.bozza || (f.bozza = { testo: '', tipologia: '', categoria: '' });
+    const lista = regole();
+    const fiat = tutti('fiat');
+    const tipologie = perUso(fiat.filter(m => !daClassificare(m)).map(m => m.tipologia));
+    const categorie = perUso(fiat.map(m => m.categoria).filter(c => c && !stesso(c, 'Da classificare')));
+    const sospese = fiat.filter(daClassificare);
+    const coperte = sospese.filter(m => regolaPer(m.descrizione, lista)).length;
+    const perDescr = new Map();
+    for (const m of sospese) {
+        const d = m.descrizione || '(senza descrizione)';
+        const g = perDescr.get(d) || { d, n: 0, regola: regolaPer(m.descrizione, lista) };
+        g.n++; perDescr.set(d, g);
+    }
+    const elenco = [...perDescr.values()].filter(g => !g.regola).sort((a, b) => b.n - a.n).slice(0, 40);
+    const prova = v.testo.trim() ? sospese.filter(m => m.descrizione.toLowerCase().includes(v.testo.trim().toLowerCase())).length : 0;
+    return `
+        <h2>Regole delle categorie<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Se la descrizione di un movimento contiene il testo, gli do tipologia e categoria. Valgono per i movimenti da classificare, per gli import e quando scrivi una descrizione nuova.</p>
+        <div class="campo"><label>Se la descrizione contiene</label><input data-campo="testo" value="${esc(v.testo)}" placeholder="Es. esselunga" autocomplete="off"></div>
+        ${v.testo.trim() ? `<p class="nota" data-prova>${prova} movimenti da classificare la contengono</p>` : '<p class="nota" data-prova>&nbsp;</p>'}
+        <div class="affiancati">
+            <div class="campo"><label>Tipologia</label><input data-campo="tipologia" list="l-tip" value="${esc(v.tipologia)}" autocomplete="off">${datalist('l-tip', tipologie)}</div>
+            <div class="campo"><label>Categoria</label><input data-campo="categoria" list="l-cat" value="${esc(v.categoria)}" autocomplete="off">${datalist('l-cat', categorie)}</div>
+        </div>
+        ${chips('tipologia', tipologie, v.tipologia)}
+        ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
+        <button class="bottone" data-az="aggiungi-regola">Aggiungi regola</button>
+        ${lista.length ? `<div class="sezione"><span>Regole (${lista.length})</span></div>
+            ${lista.map((x, i) => `<div class="regola"><span>«${esc(x.testo)}» → <b>${esc(x.tipologia)}</b>${x.categoria ? ` · ${esc(x.categoria)}` : ''}</span>
+                <span>${i ? `<button class="icona" data-az="sposta-regola" data-val="${i}" aria-label="Più in alto">↑</button>` : ''}<button class="icona" data-az="togli-regola" data-val="${i}" aria-label="Togli">✕</button></span></div>`).join('')}` : ''}
+        ${sospese.length ? `<div class="sezione"><span>Da classificare (${sospese.length})</span></div>
+            ${coperte ? `<button class="bottone" data-az="applica-regole">Applica le regole a ${coperte} movimenti</button>` : ''}
+            <p class="nota">Tocca una descrizione per farne una regola.</p>
+            <div class="chips a-capo">${elenco.map(g => `<button class="chip" data-az="da-descrizione" data-val="${esc(g.d)}">${esc(g.d)}${g.n > 1 ? ` <small>×${g.n}</small>` : ''}</button>`).join('')}</div>` : ''}
+    `;
+}
+
+// ---------- import (draft: the column guesses are not yet checked against a real export) ----------
+
+const FONTI = {
+    bbva: { nome: 'BBVA', valuta: 'EUR', conto: 'BBVA', nota: 'Export dei movimenti dall\'app o dal sito BBVA, in CSV (un .xlsx va prima salvato come CSV).' },
+    phoenix: { nome: 'Phoenix', valuta: 'BTC', rete: 'LN', conto: 'Phoenix', nota: 'Impostazioni → Pagamenti → Esporta in CSV.' },
+    blixt: { nome: 'Blixt', valuta: 'BTC', rete: 'LN', conto: 'Blixt', nota: 'Export delle transazioni di Blixt Wallet in CSV.' },
+    csv: { nome: 'Altro CSV', valuta: null, conto: '', nota: 'Qualsiasi CSV con una colonna di data e una di importo.' },
+};
+
+function trovaColonna(testa, ...prove) {
+    for (const re of prove) {
+        const i = testa.findIndex(h => re.test(h.trim()));
+        if (i >= 0) return i;
+    }
+    return -1;
+}
+
+function dataDa(s) {
+    const t = String(s ?? '').trim();
+    let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/);
+    if (m) return `${m[3].length === 2 ? `20${m[3]}` : m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    if (/^\d{9,13}$/.test(t)) return giorno(new Date(Number(t) * (t.length > 11 ? 1 : 1000)));
+    return null;
+}
+
+// Finds the header row and the columns by name, so one reader covers the bank and the wallets.
+function analizzaImport(testo, valuta) {
+    const pulito = (testo || '').replace(/^﻿/, '');
+    const prima = pulito.split(/\r?\n/).find(l => l.trim()) || '';
+    const sep = [';', '\t', ','].sort((a, b) => prima.split(b).length - prima.split(a).length)[0];
+    const righe = righeCSV(pulito, sep);
+    const iTesta = righe.findIndex(r => r.some(h => /^(data|date|fecha|timestamp|time|created)/i.test(h.trim())));
+    if (iTesta < 0) throw new Error('Non trovo una colonna con la data (Data, Date, Fecha, timestamp…)');
+    const testa = righe[iTesta];
+    const corpo = righe.slice(iTesta + 1).filter(r => r.some(c => c.trim()));
+    const col = {
+        data: trovaColonna(testa, /^data (operazione|contabile)/i, /^(date|fecha|data)$/i, /^(timestamp|created|time)/i, /data|date|fecha/i),
+        descr: trovaColonna(testa, /descri|concepto|causale|memo|description|note|label|message/i),
+        verso: trovaColonna(testa, /^(type|tipo|direction|verso)$/i),
+        fiat: trovaColonna(testa, /amount_?fiat|fiat|eur(o)?$/i),
+    };
+    const msat = trovaColonna(testa, /msat/i);
+    const sat = trovaColonna(testa, /(^|_|\s)sats?($|_|\s)|satoshi|amount_?sat/i);
+    const btcCol = trovaColonna(testa, /btc|bitcoin/i);
+    const importo = trovaColonna(testa, /^importo|^importe|^amount$|^ammontare|^valore/i, /importo|importe|amount/i);
+    const entrate = trovaColonna(testa, /entrat|avere|accredit|credit/i);
+    const usciteC = trovaColonna(testa, /uscit|dare|addebit|debit/i);
+    let quanto;
+    if (valuta === 'BTC') {
+        if (msat >= 0) quanto = r => numero(r[msat]) / 1e11;
+        else if (sat >= 0) quanto = r => numero(r[sat]) / 1e8;
+        else if (btcCol >= 0) quanto = r => numero(r[btcCol]);
+        else if (importo >= 0) quanto = r => numero(r[importo]) / 1e8;
+    } else if (importo >= 0) quanto = r => numero(r[importo]);
+    else if (entrate >= 0 && usciteC >= 0) quanto = r => (numero(r[entrate]) || 0) - Math.abs(numero(r[usciteC]) || 0);
+    if (!quanto) throw new Error(`Non trovo la colonna dell'importo${valuta === 'BTC' ? ' in sat o msat' : ''}`);
+
+    const lette = corpo.map(r => ({ data: dataDa(r[col.data]), q: quanto(r), descr: col.descr >= 0 ? r[col.descr].trim() : '', verso: col.verso >= 0 ? r[col.verso] : '', fiat: col.fiat >= 0 ? numero(r[col.fiat]) : NaN }));
+    const buone = lette.filter(x => x.data && Number.isFinite(x.q) && x.q !== 0);
+    // Wallets often write every amount as positive and say the direction in its own column.
+    if (buone.every(x => x.q > 0) && col.verso >= 0) {
+        for (const x of buone) if (/out|sent|send|pay|uscit|spes/i.test(x.verso)) x.q = -x.q;
+    }
+    const usate = [['data', col.data], ['importo', [msat, sat, btcCol, importo, entrate].find(i => i >= 0)], ['descrizione', col.descr], ['verso', col.verso], ['euro', valuta === 'BTC' ? col.fiat : -1]]
+        .filter(([, i]) => i >= 0).map(([k, i]) => `${k} ← "${testa[i]}"`);
+    return { righe: buone, scartate: lette.length - buone.length, usate };
+}
+
+function chiave(m) {
+    return m.tipo === 'fiat'
+        ? ['F', m.data, m.importo.toFixed(2), m.persona, m.conto, m.descrizione].join('|')
+        : ['B', m.data, m.bitcoin.toFixed(8), m.euro.toFixed(2), m.persona].join('|');
+}
+
+function movimentiDaImport(f) {
+    const fonte = FONTI[f.fonte];
+    const p = trovaPortafoglio(f.persona, f.conto);
+    const valuta = p ? p.valuta : fonte.valuta || 'EUR';
+    const tipo = VALUTA[valuta];
+    const a = analizzaImport(f.testo, valuta);
+    const storia = tutti('fiat');
+    const lista = regole();
+    const nuovi = a.righe.map(x => {
+        if (tipo === 'fiat') {
+            // A description seen before brings back how it was filed.
+            const prec = regolaPer(x.descr, lista) || (x.descr && storia.filter(s => s.descrizione.toLowerCase() === x.descr.toLowerCase()).sort((s, t) => t.data.localeCompare(s.data))[0]);
+            return { tipo, id: nuovoId(), data: x.data, persona: f.persona.trim(), conto: f.conto.trim(), importo: Math.round(x.q * 100) / 100,
+                tipologia: prec?.tipologia || '', categoria: prec ? prec.categoria || categoriaPer(prec) : '', descrizione: x.descr, euro: 0, bitcoin: 0, prezzo: null };
+        }
+        const eur = Number.isFinite(x.fiat) ? Math.sign(x.q) * Math.abs(x.fiat) : 0;
+        return { tipo, id: nuovoId(), data: x.data, persona: f.persona.trim(), conto: f.conto.trim(), importo: 0, tipologia: '', categoria: '',
+            descrizione: x.descr, euro: eur, bitcoin: x.q, prezzo: eur && x.q ? Math.abs(eur / x.q) : null };
+    });
+    // Imported again, an export adds only what is not there yet (counting repeats).
+    const presenti = new Map();
+    for (const m of tutti(tipo).filter(m => stesso(m.conto, f.conto) && stesso(m.persona, f.persona))) {
+        const k = chiave({ ...m, conto: f.conto.trim(), persona: f.persona.trim() });
+        presenti.set(k, (presenti.get(k) || 0) + 1);
+    }
+    const daAggiungere = nuovi.filter(m => {
+        const n = presenti.get(chiave(m)) || 0;
+        if (n > 0) { presenti.set(chiave(m), n - 1); return false; }
+        return true;
+    });
+    return { tipo, valuta, analisi: a, daAggiungere, gia: nuovi.length - daAggiungere.length };
+}
+
+function foglioImporta(f) {
+    const fonte = FONTI[f.fonte];
+    let anteprima = '';
+    let esito = null;
+    if (f.testo != null && f.conto.trim() && f.persona.trim()) {
+        try {
+            esito = movimentiDaImport(f);
+            const r = esito.daAggiungere;
+            const date = r.map(m => m.data).sort();
+            const tot = r.reduce((s, m) => s + (esito.tipo === 'fiat' ? m.importo : m.bitcoin), 0);
+            anteprima = `<div class="scheda" style="margin-bottom:0.75rem">
+                <small>${esc(f.nomeFile || 'File')}</small>
+                <strong>${r.length} movimenti nuovi</strong>
+                <p class="nota" style="margin:0.3rem 0 0">${date.length ? `dal ${new Date(`${date[0]}T12:00:00`).toLocaleDateString('it-IT')} al ${new Date(`${date.at(-1)}T12:00:00`).toLocaleDateString('it-IT')} · totale ${esito.tipo === 'fiat' ? euro(tot) : btc(tot)}<br>` : ''}${esito.gia ? `${esito.gia} già presenti, ` : ''}${esito.analisi.scartate ? `${esito.analisi.scartate} righe illeggibili, ` : ''}colonne: ${esc(esito.analisi.usate.join(', '))}</p>
+            </div>`;
+        } catch (e) {
+            anteprima = `<p class="errore">${esc(e.message)}</p>`;
+        }
+    }
+    const esistente = trovaPortafoglio(f.persona, f.conto);
+    const valutaConto = esistente ? esistente.valuta : fonte.valuta || 'EUR';
+    const conti = [...new Set([fonte.conto, ...nomiPortafogli(VALUTA[valutaConto], f.persona)].filter(Boolean))];
+    return `
+        <h2>Importa movimenti<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Bozza: le colonne sono riconosciute dal nome e non le ho ancora provate su un export vero. Controlla l'anteprima prima di confermare.</p>
+        <div class="campo"><label>Da dove</label>
+            <div class="chips">${Object.entries(FONTI).map(([k, x]) => `<button class="chip${x.valuta === 'BTC' ? ' btc' : ''}${f.fonte === k ? ' attivo' : ''}" data-az="fonte" data-val="${k}">${esc(x.nome)}</button>`).join('')}</div>
+            <p class="nota">${esc(fonte.nota)}</p>
+        </div>
+        <div class="campo"><label>Di chi</label>${chips('persona', persone(), f.persona)}</div>
+        <div class="campo"><label>Nel portafoglio</label>
+            <input data-campo="conto" list="l-conto" value="${esc(f.conto)}" autocomplete="off">${lista('l-conto', conti)}${chips('conto', conti, f.conto, valutaConto === 'BTC')}
+            ${f.conto.trim() && !esistente ? `<p class="nota">${esc(f.persona)} non ha ancora questo portafoglio: lo creo in ${valutaConto === 'BTC' ? 'bitcoin' : 'euro'}.</p>` : ''}
+        </div>
+        <div class="campo"><label>File</label><input type="file" accept=".csv,text/csv,text/plain,text/comma-separated-values" data-file="import"></div>
+        ${anteprima}
+        <button class="bottone${valutaConto === 'BTC' ? ' btc' : ''}" data-az="conferma-import" ${esito?.daAggiungere.length ? '' : 'disabled'}>${esito?.daAggiungere.length ? `Importa ${esito.daAggiungere.length} movimenti` : 'Importa'}</button>
+    `;
+}
+
+function confermaImport() {
+    const f = S.foglio;
+    const fonte = FONTI[f.fonte];
+    if (!trovaPortafoglio(f.persona, f.conto)) creaPortafoglio(f.persona, f.conto, fonte.valuta || 'EUR', fonte.rete);
+    const { daAggiungere } = movimentiDaImport(f);
+    const p = trovaPortafoglio(f.persona, f.conto);
+    const perAnno = new Map();
+    for (const m of daAggiungere) perAnno.set(m.data.slice(0, 4), [...(perAnno.get(m.data.slice(0, 4)) || []), { ...m, conto: p.nome, persona: p.persona }]);
+    for (const [anno, nuovi] of perAnno) cambiaAnno(p, anno, r => [...r, ...nuovi]);
+    chiudiFoglio();
+    S.conto = p.nome;
+    S.persona = p.persona;
+    S.tab = p.tipo === 'fiat' ? 'movimenti' : 'bitcoin';
+    avvisa(`${daAggiungere.length} movimenti importati in ${p.cartella}`);
+}
+
+// Keeps what has been typed when the sheet is drawn again (a chip tapped, the direction switched).
+function leggiBozza() {
+    const f = S.foglio;
+    if (!f) return;
+    const dest = f.tipo === 'importa' ? f : f.bozza;
+    if (!dest) return;
+    document.querySelectorAll('#foglio input[data-campo]').forEach(i => { dest[i.dataset.campo] = i.value; });
+}
+
+function salvaFoglio() {
+    leggiBozza();
+    const f = S.foglio;
+    const v = f.bozza;
+    const vecchio = f.mov;
+    try {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(v.data)) throw new Error('Data non valida');
+        if (!v.persona.trim()) throw new Error('Manca la persona');
+        if (!v.conto.trim()) throw new Error('Manca il portafoglio');
+        let m;
+        if (f.tipo === 'fiat') {
+            const n = numero(v.importo);
+            if (!n) throw new Error("Scrivi l'importo: negativo se è una spesa");
+            m = {
+                tipo: 'fiat', id: vecchio?.id || nuovoId(), data: v.data, persona: v.persona.trim(), conto: v.conto.trim(),
+                importo: n, tipologia: v.tipologia.trim(), categoria: v.categoria.trim(),
+                descrizione: v.descrizione.trim(), euro: 0, bitcoin: 0, prezzo: null,
+            };
+        } else {
+            const conSegnoQ = satsDa(v.quanti) / 1e8;
+            if (!conSegnoQ) throw new Error('Scrivi quanti sats: negativi se escono');
+            const s = conSegnoQ < 0 ? -1 : 1, q = Math.abs(conSegnoQ);
+            // Euro are worked out at the price of that day and saved, unless typed in by hand.
+            let e = Math.abs(numero(v.euro));
+            if (!(e > 0)) { const p = prezzoNoto(v.data); e = p ? Math.round(q * p * 100) / 100 : 0; }
+            m = {
+                tipo: 'bitcoin', id: vecchio?.id || nuovoId(), data: v.data, persona: v.persona.trim(), conto: v.conto.trim(),
+                importo: 0, tipologia: '', categoria: '', descrizione: v.descrizione.trim(),
+                euro: s * e, bitcoin: s * q, prezzo: e > 0 ? e / q : null,
+            };
+        }
+        salvaMovimento(m, vecchio);
+        if (m.tipo === 'fiat' && !vecchio) S.mese = m.data.slice(0, 7);
+        chiudiFoglio();
+        disegna();
+        avvisa(vecchio ? 'Modifica salvata' : 'Movimento salvato');
+    } catch (e) {
+        f.errore = e.message;
+        disegnaFoglio();
+    }
+}
+
+// ---------- events ----------
+
+const azioni = {
+    tab: v => { S.tab = v; window.scrollTo(0, 0); },
+    mese: v => { S.mese = spostaMese(S.mese, Number(v)); S.calGiorno = ''; },
+    'vista-mov': v => { S.vistaMov = v; },
+    'cal-colore': v => { S.calColore = v; },
+    'mostra-zero': () => { S.mostraZero = !S.mostraZero; },
+    'cal-scala': v => { S.calScala = v; S.calSettimana = ''; },
+    'cal-settimana': v => { S.calSettimana = spostaGiorni(lunediDi(S.calSettimana || oggiNelMese()), Number(v) * 7); S.mese = S.calSettimana.slice(0, 7); },
+    'btc-periodo': v => { S.btcPeriodo = v; S.btcScelto = ''; },
+    'btc-scegli': v => { S.btcScelto = S.btcScelto === v ? '' : v; },
+    'cal-giorno': v => { S.calGiorno = v; },
+    anno: v => { S.anno += Number(v); },
+    'scegli-mese': v => { S.mese = v; S.vistaCat = 'mese'; },
+    'vista-cat': v => { S.vistaCat = v; },
+    cat: v => { S.catAperta = S.catAperta === v ? '' : v; },
+    persona: v => { S.persona = v; },
+    conto: v => { S.conto = v; },
+    'bol-periodo': v => { S.bolPeriodo = v; S.bolScelto = ''; },
+    'bol-tipo': v => { S.bolTipo = v; window.scrollTo(0, 0); },
+    'bol-scegli': v => { S.bolScelto = v; },
+    'apri-conto': (v, el) => {
+        const p = trovaPortafoglio(el.dataset.persona, v);
+        S.conto = v;
+        S.persona = el.dataset.persona;
+        S.tab = p?.tipo === 'bitcoin' ? 'bitcoin' : 'movimenti';
+        window.scrollTo(0, 0);
+    },
+    prezzo: () => { aggiornaPrezzo(); avvisa('Aggiorno il prezzo…'); return false; },
+    nuovo: () => { apriFoglio({ tipo: S.tab === 'bitcoin' ? 'bitcoin' : 'fiat' }); return false; },
+    apri: (v, el) => { apriFoglio({ tipo: el.dataset.tipo, mov: trova(el.dataset.tipo, el.dataset.id) }); return false; },
+    impostazioni: () => { apriFoglio({ tipo: 'impostazioni' }); return false; },
+    menu: () => { apriFoglio({ tipo: 'menu' }); return false; },
+    'nuovo-portafoglio': () => { apriFoglio({ tipo: 'portafoglio' }); return false; },
+    importa: () => { apriFoglio({ tipo: 'importa', fonte: 'bbva', persona: S.persona || pref.io, conto: 'BBVA', testo: null }); return false; },
+    chiudi: () => { chiudiFoglio(); return false; },
+    verso: v => {
+        leggiBozza();
+        const b = S.foglio.bozza;
+        b.uscita = v === 'u';
+        if (S.foglio.tipo === 'fiat') b.importo = conSegno(b.importo, b.uscita);
+        else b.quanti = conSegno(b.quanti, b.uscita);
+        disegnaFoglio();
+        return false;
+    },
+    valuta: v => { leggiBozza(); S.foglio.bozza.valuta = v; disegnaFoglio(); return false; },
+    rete: v => { leggiBozza(); S.foglio.bozza.rete = v; disegnaFoglio(); return false; },
+    'crea-portafoglio': () => {
+        leggiBozza();
+        const b = S.foglio.bozza;
+        try {
+            const p = creaPortafoglio(b.persona, b.nome, b.valuta, b.rete);
+            chiudiFoglio();
+            avvisa(`Portafoglio ${p.cartella} creato`);
+            return true;
+        } catch (e) {
+            S.foglio.errore = e.message;
+            disegnaFoglio();
+            return false;
+        }
+    },
+    fonte: v => {
+        leggiBozza();
+        const f = S.foglio;
+        f.fonte = v;
+        if (FONTI[v].conto) f.conto = trovaPortafoglio(f.persona, FONTI[v].conto)?.nome || FONTI[v].conto;
+        disegnaFoglio();
+        return false;
+    },
+    'conferma-import': () => {
+        try { confermaImport(); return true; } catch (e) { avvisa(e.message); return false; }
+    },
+    metti: (v, el) => {
+        const campo = el.dataset.campo;
+        if (campo === 'io') { pref.io = v; disegnaFoglio(); return true; }
+        leggiBozza();
+        if (S.foglio.tipo === 'importa') S.foglio[campo] = v;
+        else S.foglio.bozza[campo] = v;
+        if (campo === 'tipologia') S.foglio.bozza.daRegola = false;
+        if (campo === 'tipologia') suggerisciCategoria();
+        disegnaFoglio();
+        return false;
+    },
+    salva: () => { salvaFoglio(); return false; },
+    regole: (v, el) => {
+        leggiBozza();
+        const b = S.foglio?.tipo === 'fiat' ? S.foglio.bozza : null;
+        apriFoglio({ tipo: 'regole', bozza: b ? { testo: (b.descrizione || '').trim().toLowerCase(), tipologia: daClassificare(b) ? '' : b.tipologia, categoria: stesso(b.categoria, 'Da classificare') ? '' : b.categoria } : null });
+        return false;
+    },
+    'aggiungi-regola': () => {
+        leggiBozza();
+        const f = S.foglio, b = f.bozza;
+        const testo = b.testo.trim(), tipologia = b.tipologia.trim(), categoria = b.categoria.trim() || categoriaPer({ tipologia });
+        if (testo.length < 3) { f.errore = 'Scrivi almeno 3 lettere da cercare nella descrizione'; disegnaFoglio(); return false; }
+        if (!tipologia) { f.errore = 'Scegli la tipologia'; disegnaFoglio(); return false; }
+        const lista = regole().filter(x => !stesso(x.testo, testo));
+        try { salvaRegole([{ testo, tipologia, categoria }, ...lista]); } catch (e) { f.errore = e.message; disegnaFoglio(); return false; }
+        const n = applicaRegole();
+        f.bozza = { testo: '', tipologia: '', categoria: '' }; f.errore = '';
+        disegna(); disegnaFoglio();
+        avvisa(n ? `Regola salvata: ${n} movimenti classificati` : 'Regola salvata');
+        return false;
+    },
+    'togli-regola': v => { const l = regole(); l.splice(Number(v), 1); salvaRegole(l); disegnaFoglio(); return false; },
+    'sposta-regola': v => { const l = regole(), i = Number(v); [l[i - 1], l[i]] = [l[i], l[i - 1]]; salvaRegole(l); disegnaFoglio(); return false; },
+    'applica-regole': () => { const n = applicaRegole(); disegna(); disegnaFoglio(); avvisa(`${n} movimenti classificati`); return false; },
+    'da-descrizione': v => { leggiBozza(); S.foglio.bozza.testo = v.toLowerCase(); disegnaFoglio(); document.querySelector('#foglio [data-campo=testo]')?.focus(); return false; },
+    elimina: () => {
+        const m = S.foglio.mov;
+        if (!confirm('Eliminare questo movimento?')) return false;
+        try {
+            eliminaMovimento(m);
+            chiudiFoglio();
+            avvisa('Movimento eliminato');
+        } catch (e) {
+            avvisa(e.message);
+        }
+        return true;
+    },
+    unita: v => { pref.unita = v; disegnaFoglio(); },
+    ricarica: () => { S.file = {}; carica(); aggiornaPrezzo(); if (S.foglio?.tipo === 'menu') chiudiFoglio(); else disegnaFoglio(); avvisa('File riletti'); },
+    permesso: () => { A.chiediPermesso(); return false; },
+    cartella: () => { A.scegliCartella(); return false; },
+    io: v => { pref.io = v; },
+    inizia: () => { scriviLocale('bilancio.avviato', true); carica(); aggiornaPrezzo(); },
+};
+
+document.addEventListener('click', e => {
+    const el = e.target.closest('[data-az]');
+    if (!el) return;
+    const fai = azioni[el.dataset.az];
+    if (!fai) return;
+    e.preventDefault();
+    if (fai(el.dataset.val ?? '', el) !== false) disegna();
+});
+
+// The category follows the type, as the old sheet's lookup did, unless one was typed by hand.
+function suggerisciCategoria() {
+    const b = S.foglio.bozza;
+    const fiat = tutti('fiat');
+    const auto = new Set(fiat.map(x => x.categoria));
+    const proposta = perUso(fiat.filter(x => x.tipologia === b.tipologia).map(x => x.categoria))[0];
+    if (proposta && (!b.categoria || auto.has(b.categoria))) b.categoria = proposta;
+}
+
+document.addEventListener('input', e => {
+    const campo = e.target.dataset?.campo;
+    if (!campo) return;
+    if (campo === 'cerca') { S.cerca = e.target.value; disegna(); return; }
+    if (campo === 'io' && !S.foglio) { pref.io = e.target.value.trim(); disegna(); return; }
+    if (!S.foglio) return;
+    if (S.foglio.tipo === 'fiat' && campo === 'descrizione') {
+        const b = S.foglio.bozza, x = regolaPer(e.target.value);
+        if (x && b && (!b.tipologia || b.daRegola)) {
+            b.tipologia = x.tipologia; b.categoria = categoriaPer(x); b.daRegola = true;
+            const t = document.querySelector('#foglio [data-campo=tipologia]'), c = document.querySelector('#foglio [data-campo=categoria]');
+            if (t) t.value = b.tipologia;
+            if (c) c.value = b.categoria;
+        }
+    }
+    if (S.foglio.tipo === 'fiat' && campo === 'tipologia' && S.foglio.bozza) S.foglio.bozza.daRegola = false;
+    if (S.foglio.tipo === 'regole' && campo === 'testo') {
+        const t = e.target.value.trim().toLowerCase(), el = document.querySelector('[data-prova]');
+        if (el) el.textContent = t ? `${tutti('fiat').filter(m => daClassificare(m) && m.descrizione.toLowerCase().includes(t)).length} movimenti da classificare la contengono` : ' ';
+    }
+    if ((S.foglio.tipo === 'fiat' && campo === 'importo') || (S.foglio.tipo === 'bitcoin' && campo === 'quanti')) {
+        const uscita = /^\s*[-−]/.test(e.target.value);
+        if (S.foglio.bozza) S.foglio.bozza.uscita = uscita;
+        document.querySelectorAll('#foglio .interruttore [data-az=verso]').forEach(b => b.classList.toggle('attivo', (b.dataset.val === 'u') === uscita));
+    }
+    if (S.foglio.tipo === 'bitcoin' && (campo === 'euro' || campo === 'quanti' || campo === 'data')) {
+        leggiBozza();
+        const b = S.foglio.bozza;
+        if (campo === 'data' && !(b.data in storico)) prezzoDel(b.data).then(aggiornaControvalore);
+        aggiornaControvalore();
+    }
+});
+
+document.addEventListener('change', e => {
+    if (e.target.dataset?.file === 'import' && S.foglio?.tipo === 'importa') {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        leggiBozza();
+        const r = new FileReader();
+        r.onload = () => { S.foglio.testo = String(r.result || ''); S.foglio.nomeFile = file.name; disegnaFoglio(); };
+        r.onerror = () => avvisa('Non riesco a leggere il file');
+        r.readAsText(file);
+        return;
+    }
+    const campo = e.target.dataset?.campo;
+    if (!S.foglio || !campo) return;
+    if (S.foglio.tipo === 'importa' && (campo === 'conto' || campo === 'persona')) { leggiBozza(); disegnaFoglio(); return; }
+    if (S.foglio.tipo !== 'fiat') return;
+    leggiBozza();
+    const b = S.foglio.bozza;
+    if (campo === 'descrizione' && b.descrizione && !S.foglio.mov) {
+        // A description already used brings back how it was filed last time.
+        const ultimo = tutti('fiat').filter(x => x.descrizione.toLowerCase() === b.descrizione.toLowerCase())
+            .sort((x, y) => y.data.localeCompare(x.data))[0];
+        if (ultimo) {
+            if (!b.tipologia) b.tipologia = ultimo.tipologia;
+            if (!b.categoria) b.categoria = ultimo.categoria;
+            b.conto = ultimo.conto || b.conto;
+            disegnaFoglio();
+        }
+    } else if (campo === 'tipologia') {
+        suggerisciCategoria();
+        disegnaFoglio();
+    } else if (campo === 'persona') {
+        disegnaFoglio();
+    }
+});
+
+// Called by the activity.
+window.indietro = () => {
+    if (S.foglio) { chiudiFoglio(); return true; }
+    if (pronto() && S.conto) { S.conto = ''; S.persona = ''; disegna(); return true; }
+    if (pronto() && S.tab === 'bollette' && S.bolTipo) { S.bolTipo = ''; disegna(); return true; }
+    if (pronto() && S.tab !== 'movimenti') { S.tab = 'movimenti'; disegna(); return true; }
+    return false;
+};
+
+window.alRitorno = () => {
+    if (A.permesso() && A.cartella()) carica();
+    if (pronto() && (!S.prezzo || Date.now() - S.prezzo.ts > 2 * 60 * 1000)) aggiornaPrezzo();
+    // Back from the file picker the sheet is still the one the user is filling in.
+    if (S.foglio?.tipo === 'importa') return;
+    disegna();
+    if (S.foglio?.tipo === 'impostazioni') disegnaFoglio();
+};
+
+window.cartellaScelta = percorso => {
+    if (!percorso) { avvisa('Questa cartella non si può usare: scegline una nella memoria del telefono.'); return; }
+    // Picking Bilancio instead of Bilancio/dati is the obvious slip, so it is forgiven.
+    A.impostaCartella(percorso);
+    const dentro = (sub, nome) => (sub ? `${sub}/${nome}` : nome);
+    const haPortafogli = sub => elenco(sub).some(d => d.dir && (d.nome === 'fiat' || d.nome === 'bitcoin'
+        || elenco(dentro(sub, d.nome)).some(c => c.dir && elenco(dentro(sub, `${d.nome}/${c.nome}`)).some(f => f.nome === 'portafoglio.json'))));
+    if (!haPortafogli('') && elenco('').some(d => d.dir && d.nome === 'dati') && haPortafogli('dati')) A.impostaCartella(`${percorso}/dati`);
+    S.file = {};
+    carica();
+    disegna();
+    if (S.foglio?.tipo === 'impostazioni') disegnaFoglio();
+};
+
+if (A.permesso() && A.cartella()) carica();
+disegna();
+if (pronto()) aggiornaPrezzo();

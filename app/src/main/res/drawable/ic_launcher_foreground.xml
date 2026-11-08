@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Three bars rising, euro blue and bitcoin orange, inside the 72dp safe zone of the adaptive icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#3B82F6" android:pathData="M33,58 h11 a2,2 0 0 1 2,2 v18 h-15 v-18 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#10B981" android:pathData="M49,46 h11 a2,2 0 0 1 2,2 v30 h-15 v-30 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#F59E0B" android:pathData="M65,32 h11 a2,2 0 0 1 2,2 v44 h-15 v-44 a2,2 0 0 1 2,-2 z" />
+</vector>
