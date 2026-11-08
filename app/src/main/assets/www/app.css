@@ -423,3 +423,11 @@ p.avviso-finanza { display: block; }
 .riga-conto .cifra { display: flex; flex-direction: column; align-items: flex-end; white-space: nowrap; }
 .pannello .livello { margin-top: 0; box-shadow: none; }
 .pannello .livello h2 { color: var(--c); }
+.confronto .c-freccia { font-size: 8px; fill: var(--tenue); }
+.tabella-confronto { display: grid; grid-template-columns: 1.5fr 1fr 1fr 0.9fr; gap: 0.35rem 0.5rem; align-items: center; margin-top: 0.6rem; font-size: 0.8rem; }
+.tabella-confronto > small { color: var(--tenue); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; text-align: right; }
+.tabella-confronto > span:nth-child(4n+1) { display: flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+.tabella-confronto > span:not(:nth-child(4n+1)) { text-align: right; display: flex; flex-direction: column; }
+.tabella-confronto span small { color: var(--tenue); font-size: 0.68rem; }
+.tabella-confronto > b { text-align: right; }
+.tabella-confronto i { width: 0.6rem; height: 0.6rem; border-radius: 2px; flex: none; }
