@@ -18,7 +18,8 @@ const S = {
     file: {},              // 'Alan/BBVA/2026.csv' -> { mtime, size, conto, persona, tipo, righe }
     conflitti: [],
     vecchioFormato: false,
-    tab: 'movimenti',
+    tab: 'home',
+    strato: 'cold',
     mese: oggi().slice(0, 7),
     anno: Number(oggi().slice(0, 4)),
     persona: '',
@@ -188,9 +189,10 @@ function carica() {
             let meta = {};
             try { meta = JSON.parse(A.leggi(`${cartella}/portafoglio.json`) || '{}'); } catch { meta = {}; }
             const valuta = meta.valuta === 'BTC' ? 'BTC' : 'EUR';
-            // A bitcoin portfolio is on-chain unless its file says Lightning: the cold wallet is the real account.
+            // A bitcoin portfolio is on-chain unless its file says Lightning, and cold unless it says hot.
             const rete = valuta === 'BTC' ? (meta.rete === 'LN' ? 'LN' : 'onchain') : null;
-            const p = { persona: d.nome, nome: meta.nome || c.nome, cartella, valuta, tipo: VALUTA[valuta], rete };
+            const strato = valuta !== 'BTC' ? 'fiat' : rete === 'LN' ? 'ln' : meta.custodia === 'hot' ? 'hot' : 'cold';
+            const p = { persona: d.nome, nome: meta.nome || c.nome, cartella, valuta, tipo: VALUTA[valuta], rete, strato, stratoScelto: rete === 'LN' || !!meta.custodia };
             portafogli.set(`${p.persona}/${p.nome}`, p);
             for (const f of figli) {
                 if (f.nome.includes('sync-conflict')) conflitti.push(`${cartella}/${f.nome}`);
@@ -231,7 +233,12 @@ function nomeCartella(s) {
     return String(s || '').replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
 }
 
-function creaPortafoglio(persona, nome, valuta, rete) {
+function metaPortafoglio(nome, valuta, strato) {
+    if (valuta !== 'BTC') return { nome, valuta };
+    return strato === 'ln' ? { nome, valuta, rete: 'LN' } : { nome, valuta, custodia: strato === 'hot' ? 'hot' : 'cold' };
+}
+
+function creaPortafoglio(persona, nome, valuta, strato) {
     persona = String(persona || '').trim();
     nome = String(nome || '').trim();
     if (!persona) throw new Error('Manca la persona');
@@ -242,10 +249,21 @@ function creaPortafoglio(persona, nome, valuta, rete) {
     const cn = nomeCartella(nome);
     if (!cp || !cn) throw new Error('Nome non valido');
     if (elenco(cp).some(d => stesso(d.nome, cn))) throw new Error(`C'è già una cartella ${cp}/${cn}`);
-    const errore = A.scrivi(`${cp}/${cn}/portafoglio.json`, JSON.stringify(valuta === 'BTC' && rete === 'LN' ? { nome, valuta, rete } : { nome, valuta }, null, 2) + '\n');
+    const errore = A.scrivi(`${cp}/${cn}/portafoglio.json`, JSON.stringify(metaPortafoglio(nome, valuta, strato), null, 2) + '\n');
     if (errore) throw new Error(errore);
     carica();
     return trovaPortafoglio(cp, nome);
+}
+
+// Keys the app does not know (written by hand or by the web app) survive the rewrite.
+function cambiaStrato(p, strato) {
+    let meta = {};
+    try { meta = JSON.parse(A.leggi(`${p.cartella}/portafoglio.json`) || '{}'); } catch { meta = {}; }
+    delete meta.rete;
+    delete meta.custodia;
+    const errore = A.scrivi(`${p.cartella}/portafoglio.json`, JSON.stringify({ ...meta, ...metaPortafoglio(p.nome, 'BTC', strato) }, null, 2) + '\n');
+    if (errore) throw new Error(errore);
+    carica();
 }
 
 // Every save starts from what is on disk right now, so a year Syncthing just brought in is not overwritten
@@ -579,39 +597,6 @@ function torta(fette, centro) {
     </div>`;
 }
 
-// Each band's area, not its height, is its share: in a triangle the area above a line grows with the square of its depth.
-// The biggest fund is the base and the smallest the tip, so the shape says at once where the money sits.
-function piramide(fondi) {
-    const strati = fondi.filter(f => f.valore > 0).sort((a, b) => a.valore - b.valore);
-    const tot = strati.reduce((t, f) => t + f.valore, 0);
-    if (strati.length < 2) return '';
-    const [cima, base, cx, mezza] = [2, 74, 34, 33];
-    const larghezza = y => (mezza * (y - cima)) / (base - cima);
-    let somma = 0, sopra = cima, ultima = -Infinity;
-    const pezzi = strati.map(f => {
-        somma += f.valore;
-        const sotto = cima + (base - cima) * Math.sqrt(somma / tot);
-        const [a, b] = [larghezza(sopra), larghezza(sotto)];
-        const forma = `<polygon points="${cx - a},${sopra} ${cx + a},${sopra} ${cx + b},${sotto} ${cx - b},${sotto}" fill="${f.colore}"/>`;
-        const ym = (sopra + sotto) / 2;
-        // Labels keep apart even when the tip is a sliver.
-        const yt = Math.max(ym, ultima + 12);
-        ultima = yt;
-        sopra = sotto;
-        const quota = (f.valore / tot) * 100;
-        return { forma, ym, yt, x: cx + larghezza(ym), f, quota };
-    });
-    const sposta = Math.max(0, ultima - (base - 2));
-    const etichette = pezzi.map(({ ym, yt, x, f, quota }) => {
-        const y = yt - sposta;
-        return `<polyline points="${x + 1},${ym} ${x + 4},${ym} ${70},${y}" fill="none" stroke="var(--bordo)" stroke-width="0.4"/>
-            <text x="72" y="${y - 1}" class="p-nome">${esc(f.nome)} <tspan class="p-quota">${quota < 1 ? quota.toFixed(1).replace('.', ',') : Math.round(quota)}%</tspan></text>
-            <text x="72" y="${y + 4.2}" class="p-valore">${esc(euroTondo(f.valore))}${f.testo ? ` · ${esc(f.testo)}` : ''}</text>`;
-    }).join('');
-    return `<div class="scheda piramide"><small>Piramide dei fondi</small>
-        <svg viewBox="0 0 130 78">${pezzi.map(x => x.forma).join('')}${etichette}</svg></div>`;
-}
-
 function voce(m) {
     const iniziale = (m.tipologia || m.categoria || '?').slice(0, 2);
     const sotto = [m.tipologia, m.conto, persone().length > 1 ? m.persona : ''].filter(Boolean).join(' · ');
@@ -893,7 +878,7 @@ function vistaConti() {
         const totBtc = sue.filter(x => x.p.tipo === 'bitcoin').reduce((s, x) => s + x.saldo, 0);
         return `<div class="sezione"><span>${esc(persona)}</span><span>${euro(totEur)}${totBtc ? ` · ${btc(totBtc)}` : ''}</span></div>
         ${sue.map(({ p, saldo, n, ultimo }) => `<button class="riga-cat conto" data-az="apri-conto" data-val="${esc(p.nome)}" data-persona="${esc(p.persona)}">
-            <div class="nome"><span>${p.tipo === 'bitcoin' ? `<b class="arancio">${p.rete === 'LN' ? '⚡' : '₿'}</b> ` : ''}${esc(p.nome)}</span><span class="${saldo < 0 ? 'negativo' : ''}">${p.tipo === 'fiat' ? euro(saldo) : btc(saldo)}</span></div>
+            <div class="nome"><span>${p.tipo === 'bitcoin' ? `<b class="arancio">${STRATI[p.strato].icona}</b> ` : ''}${esc(p.nome)}</span><span class="${saldo < 0 ? 'negativo' : ''}">${p.tipo === 'fiat' ? euro(saldo) : btc(saldo)}</span></div>
             <div class="barra"><i style="width:${(Math.abs(saldo) / (p.tipo === 'fiat' ? maxEur : maxBtc)) * 100}%;background:${saldo < 0 ? 'var(--uscita)' : p.tipo === 'fiat' ? 'var(--fiat)' : 'var(--btc)'}"></i></div>
             <small>${n} movimenti${ultimo ? ` · ultimo ${new Date(`${ultimo}T12:00:00`).toLocaleDateString('it-IT')}` : ''} · <code>${esc(p.cartella)}</code></small>
         </button>`).join('')}`;
@@ -909,11 +894,7 @@ function vistaConti() {
         { nome: 'Bitcoin', valore: (onc + lnb) * prezzo, colore: 'var(--btc)', testo: `${euroTondo((onc + lnb) * prezzo)} · ${btc(onc + lnb)}` },
     ] : [];
     const patrimonio = fette.reduce((t, f) => t + f.valore, 0);
-    const bloccoTorta = prezzo ? torta(fette, ['Patrimonio', euroTondo(patrimonio)]) + piramide([
-        { nome: '⚡ Lightning', valore: lnb * prezzo, colore: '#facc15', testo: btc(lnb) },
-        { nome: '€ Fiat', valore: eur, colore: 'var(--fiat)', testo: '' },
-        { nome: '₿ Onchain', valore: onc * prezzo, colore: 'var(--btc)', testo: btc(onc) },
-    ])
+    const bloccoTorta = prezzo ? torta(fette, ['Patrimonio', euroTondo(patrimonio)])
         : (onc + lnb ? '<button class="bottone secondario" data-az="prezzo" style="margin-bottom:0.75rem">Scarica il prezzo BTC per il grafico euro/bitcoin</button>' : '');
 
     return `
@@ -925,6 +906,208 @@ function vistaConti() {
             <button class="bottone secondario" data-az="nuovo-portafoglio">+ Portafoglio</button>
             ${azzerati ? `<button class="bottone secondario" data-az="mostra-zero">${S.mostraZero ? 'Nascondi' : 'Mostra'} ${azzerati} a zero</button>` : ''}
             <button class="bottone secondario" data-az="importa">Importa…</button>
+        </div>
+    `;
+}
+
+// ---------- the funds pyramid (Ortix) ----------
+
+// Top to bottom: the less it holds, the closer to the tip and the easier to spend.
+const STRATI = {
+    ln: { nome: 'Lightning', icona: '⚡', colore: '#facc15', ruolo: 'Punta · spese di tutti i giorni', uso: 'Caffè, spesa, micropagamenti', sicurezza: 'Bassa: pochi fondi, ricaricati dal livello hot', esempi: 'Phoenix, Breez, Zeus', concetto: 'Azione immediata' },
+    hot: { nome: 'Hot wallet', icona: '🔥', colore: '#f97316', ruolo: 'Mezzo · medio termine', uso: 'Risparmi da usare entro mesi, acquisti importanti', sicurezza: 'Media: telefono o PC, passphrase e backup cifrato', esempi: 'BlueWallet, Sparrow, Nunchuk', concetto: 'Sovranità operativa' },
+    cold: { nome: 'Cold wallet', icona: '❄', colore: '#22d3ee', ruolo: 'Base · il patrimonio', uso: 'HODL, risparmio di lungo periodo, eredità', sicurezza: 'Massima: chiavi offline, seed su acciaio', esempi: 'SeedSigner, Coldcard, Airgap Vault', concetto: 'Asset immutabile' },
+    fiat: { nome: 'Euro', icona: '€', colore: '#3b82f6', ruolo: 'Liquidità in euro', uso: 'Bollette, spese correnti, cuscinetto per le emergenze', sicurezza: 'In custodia della banca', esempi: 'Conti correnti, contanti', concetto: 'Cuscinetto' },
+};
+const ORDINE_BTC = ['ln', 'hot', 'cold'];
+const POSIZIONI_FIAT = [['fuori', 'Fuori'], ['cima', 'In cima'], ['hot', 'Sopra 🔥'], ['cold', 'Sopra ❄'], ['base', 'Alla base']];
+const PRESET = {
+    Ortix: { cold: 80, hot: 15, ln: 5 },
+    'Più sicurezza': { cold: 90, hot: 8, ln: 2 },
+    'Più liquidità': { cold: 65, hot: 25, ln: 10 },
+};
+// Kept beside the data like the rules, so every phone shows the same targets.
+const FILE_PIRAMIDE = 'piramide.json';
+// Money moved, not spent: buying bitcoin out of the bank account is not a cost of living.
+const NON_SPESA = /bitcoin|btc|investiment|giroconto|trasferiment|risparmi/i;
+
+function configPiramide() {
+    let c = {};
+    try { c = JSON.parse(A.leggi(FILE_PIRAMIDE) || '{}'); } catch { c = {}; }
+    return {
+        obiettivi: { ...PRESET.Ortix, ...(c.obiettivi || {}) },
+        fiat: POSIZIONI_FIAT.some(([k]) => k === c.fiat) ? c.fiat : 'fuori',
+        mesi: Number(c.mesi) > 0 ? Number(c.mesi) : 3,
+    };
+}
+
+function salvaConfigPiramide(c) {
+    const errore = A.scrivi(FILE_PIRAMIDE, JSON.stringify(c, null, 2) + '\n');
+    if (errore) throw new Error(errore);
+}
+
+// The average of the last twelve full months that have any movement, so a ledger started in March is not diluted.
+function spesaMensile() {
+    const ora = oggi().slice(0, 7), dal = spostaMese(ora, -12);
+    const nel = tutti('fiat').filter(filtroPersona).filter(m => { const ym = m.data.slice(0, 7); return ym >= dal && ym < ora; });
+    const mesi = new Set(nel.map(m => m.data.slice(0, 7))).size;
+    const spese = -nel.filter(m => m.importo < 0 && !NON_SPESA.test(`${m.tipologia} ${m.categoria}`)).reduce((s, m) => s + m.importo, 0);
+    return mesi ? spese / mesi : 0;
+}
+
+function statoPiramide() {
+    const cfg = configPiramide();
+    const prezzo = S.prezzo?.eur || null;
+    const strati = Object.fromEntries(Object.keys(STRATI).map(k => [k, { valore: 0, wallet: [] }]));
+    for (const p of S.portafogli.values()) {
+        if (S.persona && p.persona !== S.persona) continue;
+        const saldo = tutti(p.tipo).filter(m => m.conto === p.nome && m.persona === p.persona).reduce((s, m) => s + (p.tipo === 'fiat' ? m.importo : m.bitcoin), 0);
+        strati[p.strato].wallet.push({ p, saldo });
+        // An overdrawn account holds nothing, it does not cancel what the others hold.
+        strati[p.strato].valore += Math.max(0, saldo);
+    }
+    for (const s of Object.values(strati)) s.wallet.sort((a, b) => b.saldo - a.saldo);
+    const btcTot = ORDINE_BTC.reduce((t, k) => t + strati[k].valore, 0);
+    const somma = ORDINE_BTC.reduce((t, k) => t + Math.max(0, Number(cfg.obiettivi[k]) || 0), 0) || 1;
+    for (const k of ORDINE_BTC) {
+        strati[k].obiettivo = (Math.max(0, Number(cfg.obiettivi[k]) || 0) / somma) * 100;
+        strati[k].quota = btcTot > 0 ? (strati[k].valore / btcTot) * 100 : 0;
+        strati[k].riempito = strati[k].obiettivo > 0 ? strati[k].quota / strati[k].obiettivo : strati[k].quota > 0 ? 2 : 0;
+    }
+    const spesa = spesaMensile();
+    const cuscinetto = spesa * cfg.mesi;
+    const f = strati.fiat;
+    f.mesiCoperti = spesa > 0 ? f.valore / spesa : null;
+    f.riempito = cuscinetto > 0 ? f.valore / cuscinetto : f.valore > 0 ? 1 : 0;
+    // 100% when every layer holds exactly its share, 0% when all the bitcoin sits in a layer meant to be empty.
+    const allineamento = btcTot > 0 ? 100 - ORDINE_BTC.reduce((t, k) => t + Math.abs(strati[k].quota - strati[k].obiettivo), 0) / 2 : null;
+    const ordine = [...ORDINE_BTC];
+    if (cfg.fiat === 'cima') ordine.unshift('fiat');
+    else if (cfg.fiat === 'base') ordine.push('fiat');
+    else if (cfg.fiat !== 'fuori') ordine.splice(ordine.indexOf(cfg.fiat), 0, 'fiat');
+    return { cfg, prezzo, strati, btcTot, spesa, cuscinetto, allineamento, ordine };
+}
+
+// Equal floors, so the shape is always Ortix's. How full a floor is says how close it is to its target:
+// a floor filled edge to edge holds its share, one drawn with a dashed edge holds more than it should.
+function piramide(st) {
+    const n = st.ordine.length;
+    const [cima, alto, cx, mezza] = [4, 22, 36, 34];
+    const base = cima + alto * n;
+    const larghezza = y => (mezza * (y - cima)) / (base - cima);
+    const fmtPct = x => (x > 0 && x < 1 ? x.toFixed(1).replace('.', ',') : Math.round(x)) + '%';
+    const piani = st.ordine.map((k, i) => {
+        const s = st.strati[k], d = STRATI[k];
+        const y1 = cima + i * alto, y2 = y1 + alto, a = larghezza(y1), b = larghezza(y2);
+        const punti = `${cx - a},${y1} ${cx + a},${y1} ${cx + b},${y2} ${cx - b},${y2}`;
+        const pieno = Math.min(1, s.riempito) * b;
+        const troppo = s.riempito > 1.15;
+        const scelto = S.strato === k;
+        const ym = (y1 + y2) / 2;
+        const testo = k === 'fiat'
+            ? [`${d.icona} ${d.nome}`, s.mesiCoperti !== null ? `${s.mesiCoperti.toFixed(1).replace('.', ',')} mesi` : '',
+                euroTondo(s.valore), st.cuscinetto > 0 ? `cuscinetto ${st.cfg.mesi} mesi: ${euroTondo(st.cuscinetto)}` : 'nessuna spesa registrata']
+            : [`${d.icona} ${d.nome}`, fmtPct(s.quota),
+                `${btc(s.valore)}${st.prezzo ? ` · ${euroTondo(s.valore * st.prezzo)}` : ''}`, `obiettivo ${fmtPct(s.obiettivo)}`];
+        return `<g data-az="strato" data-val="${k}" class="piano${scelto ? ' scelto' : ''}">
+            <clipPath id="pp-${k}"><polygon points="${punti}"/></clipPath>
+            <polygon points="${punti}" fill="${d.colore}" fill-opacity="0.16"/>
+            <rect x="${cx - pieno}" y="${y1}" width="${pieno * 2}" height="${alto}" fill="${d.colore}" clip-path="url(#pp-${k})"/>
+            <polygon points="${punti}" fill="none" stroke="${troppo ? 'var(--uscita)' : scelto ? 'var(--testo)' : 'var(--sfondo)'}" stroke-width="${scelto || troppo ? 0.8 : 0.6}" ${troppo ? 'stroke-dasharray="2 1.2"' : ''}/>
+            <line x1="${cx + larghezza(ym) + 1}" x2="69" y1="${ym}" y2="${ym}" stroke="var(--bordo)" stroke-width="0.3"/>
+            <rect x="69" y="${y1}" width="61" height="${alto}" fill="transparent"/>
+            <text x="71" y="${ym - 4.6}" class="p-nome">${esc(testo[0])} <tspan class="${troppo ? 'p-troppo' : 'p-quota'}">${esc(testo[1])}</tspan></text>
+            <text x="71" y="${ym + 0.6}" class="p-valore">${esc(testo[2])}</text>
+            <text x="71" y="${ym + 5.4}" class="p-obiettivo">${esc(testo[3])}</text>
+        </g>`;
+    }).join('');
+    return `<svg viewBox="0 0 132 ${base + 2}" class="disegno-piramide">${piani}</svg>`;
+}
+
+// Moves between bitcoin layers, each under-filled layer served first by its neighbour: Lightning is topped
+// up from the hot wallet, the hot wallet from the cold one, as the Ortix guide does it by hand.
+function consigliPiramide(st) {
+    const out = [];
+    const { strati: s, btcTot, prezzo } = st;
+    const inEuro = b => (prezzo ? ` (≈ ${euroTondo(b * prezzo)})` : '');
+    if (btcTot > 0) {
+        const soglia = Math.max(btcTot * 0.02, 0.0001);
+        const scarto = Object.fromEntries(ORDINE_BTC.map(k => [k, s[k].valore - (btcTot * s[k].obiettivo) / 100]));
+        const vicini = { ln: ['hot', 'cold'], hot: ['cold', 'ln'], cold: ['hot', 'ln'] };
+        for (const k of [...ORDINE_BTC].sort((a, b) => scarto[a] - scarto[b])) {
+            for (const da of vicini[k]) {
+                const quanto = Math.min(-scarto[k], scarto[da]);
+                if (quanto < soglia) continue;
+                scarto[k] += quanto; scarto[da] -= quanto;
+                out.push({ icona: '⇄', testo: `Sposta <b>${btc(quanto)}</b>${inEuro(quanto)} da ${STRATI[da].icona} ${STRATI[da].nome} a ${STRATI[k].icona} ${STRATI[k].nome}`, az: 'strato', val: k });
+            }
+        }
+        if (!s.cold.wallet.length) out.unshift({ icona: '❄', testo: 'La base della piramide è vuota: crea un <b>cold wallet</b> (chiavi offline) per il grosso dei bitcoin.', az: 'nuovo-portafoglio', val: 'cold' });
+        if (!s.ln.wallet.length && s.ln.obiettivo > 0) out.push({ icona: '⚡', testo: 'Nessun wallet <b>Lightning</b>: aggiungine uno per le spese di tutti i giorni.', az: 'nuovo-portafoglio', val: 'ln' });
+    }
+    const daDire = [...s.cold.wallet].filter(w => !w.p.stratoScelto);
+    if (daDire.length) out.push({ icona: '?', testo: `${daDire.map(w => `<b>${esc(w.p.nome)}</b>`).join(', ')}: livello non indicato, ${daDire.length > 1 ? 'li conto come cold. Toccali se sono hot' : 'lo conto come cold. Toccalo se è hot'}.`, az: 'strato', val: 'cold' });
+    if (st.cuscinetto > 0) {
+        const f = s.fiat.valore, c = st.cuscinetto;
+        if (f < c * 0.9) out.push({ icona: '€', testo: `Il cuscinetto in euro copre <b>${(f / st.spesa).toFixed(1).replace('.', ',')} mesi</b> di spese su ${st.cfg.mesi}: mancano ${euroTondo(c - f)}.`, az: 'strato', val: 'fiat' });
+        else if (f > c * 1.25 + 200) out.push({ icona: '₿', testo: `<b>${euroTondo(f - c)}</b> in euro oltre il cuscinetto di ${st.cfg.mesi} mesi: candidati a diventare bitcoin nel ${STRATI.cold.icona} cold wallet.`, az: 'strato', val: 'fiat' });
+    }
+    if (btcTot > 0 && !prezzo) out.push({ icona: '↻', testo: 'Scarica il prezzo BTC per vedere i livelli in euro.', az: 'prezzo', val: '' });
+    return out;
+}
+
+function vistaHome() {
+    const st = statoPiramide();
+    if (!STRATI[S.strato]) S.strato = 'cold';
+    const { strati: s, btcTot, prezzo } = st;
+    const fiat = s.fiat.valore;
+    const consigli = consigliPiramide(st);
+    const scelto = STRATI[S.strato], dati = s[S.strato];
+
+    const mese = oggi().slice(0, 7);
+    const delMese = tutti('fiat').filter(filtroPersona).filter(m => m.data.startsWith(mese));
+    const entrate = delMese.filter(m => m.importo > 0).reduce((t, m) => t + m.importo, 0);
+    const uscite = -delMese.filter(m => m.importo < 0).reduce((t, m) => t + m.importo, 0);
+
+    const wallet = dati.wallet.map(({ p, saldo }) => `<button class="riga-cat conto" data-az="${p.tipo === 'bitcoin' ? 'livello-wallet' : 'apri-conto'}" data-val="${esc(p.nome)}" data-persona="${esc(p.persona)}">
+            <div class="nome"><span>${esc(p.nome)}${persone().length > 1 ? ` <small style="color:var(--tenue)">${esc(p.persona)}</small>` : ''}${p.tipo === 'bitcoin' && !p.stratoScelto ? ' <small class="arancio">livello?</small>' : ''}</span>
+            <span class="${saldo < 0 ? 'negativo' : ''}">${p.tipo === 'fiat' ? euro(saldo) : btc(saldo)}</span></div>
+            ${p.tipo === 'bitcoin' && prezzo ? `<small>≈ ${euroTondo(Math.max(0, saldo) * prezzo)} · tocca per cambiare livello</small>` : ''}
+        </button>`).join('');
+
+    return `
+        <div class="totale-btc">
+            <small>Patrimonio${S.persona ? ` di ${esc(S.persona)}` : ''}</small>
+            <strong class="patrimonio">${prezzo ? euroTondo(fiat + btcTot * prezzo) : btc(btcTot)}</strong>
+            <span>${btc(btcTot)} · ${euroTondo(fiat)}</span>
+        </div>
+        ${chipsPersone(true)}
+        <div class="scheda piramide">
+            <div class="testa-grafico"><small>Piramide dei fondi</small>
+                <span class="allineamento">${st.allineamento !== null ? `<b class="${st.allineamento >= 90 ? 'positivo' : st.allineamento >= 70 ? 'arancio' : 'negativo'}">${Math.round(st.allineamento)}%</b> in equilibrio` : ''}
+                <button class="icona piccola" data-az="cfg-piramide" aria-label="Obiettivi della piramide">⚙</button></span></div>
+            ${piramide(st)}
+            <p class="nota legenda">Piano pieno = obiettivo raggiunto · bordo rosso tratteggiato = troppi fondi lì</p>
+        </div>
+        <div class="sezione"><span>Cosa fare</span></div>
+        ${consigli.length ? consigli.map(c => `<button class="consiglio" data-az="${c.az}" data-val="${esc(c.val)}"><b>${c.icona}</b><span>${c.testo}</span></button>`).join('')
+            : '<p class="nota equilibrio">✓ La piramide rispetta gli obiettivi. Niente da spostare.</p>'}
+        <div class="scheda livello" style="--c:${scelto.colore}">
+            <div class="testa-livello"><b>${scelto.icona} ${scelto.nome}</b><small>${esc(scelto.ruolo)}</small></div>
+            <dl>
+                <dt>Uso</dt><dd>${esc(scelto.uso)}</dd>
+                <dt>Sicurezza</dt><dd>${esc(scelto.sicurezza)}</dd>
+                <dt>Esempi</dt><dd>${esc(scelto.esempi)}</dd>
+                <dt>Concetto</dt><dd>${esc(scelto.concetto)}</dd>
+            </dl>
+            ${wallet || '<p class="nota vuota">Nessun portafoglio in questo livello.</p>'}
+            <button class="bottone secondario" data-az="nuovo-portafoglio" data-val="${S.strato}">+ Portafoglio ${scelto.icona}</button>
+        </div>
+        <div class="sezione"><span>${nomeMese(mese)}</span></div>
+        <div class="riassunto">
+            <div class="scheda"><small>Entrate</small><strong class="positivo">${euroTondo(entrate)}</strong></div>
+            <div class="scheda"><small>Uscite</small><strong class="negativo">${euroTondo(uscite)}</strong></div>
+            <div class="scheda"><small>Spesa media</small><strong>${st.spesa ? euroTondo(st.spesa) : '—'}</strong></div>
         </div>
     `;
 }
@@ -1076,7 +1259,7 @@ function pronto() {
     return A.permesso() && A.cartella() && pref.io && leggiLocale('bilancio.avviato', false);
 }
 
-const TABS = [['movimenti', '€', 'Movimenti'], ['bollette', '⚡', 'Bollette'], ['bitcoin', '₿', 'Bitcoin'], ['conti', '▣', 'Conti']];
+const TABS = [['home', '△', 'Piramide'], ['movimenti', '€', 'Movimenti'], ['bollette', '⚡', 'Bollette'], ['bitcoin', '₿', 'Bitcoin'], ['conti', '▣', 'Conti']];
 
 function disegna() {
     const app = document.getElementById('app');
@@ -1084,7 +1267,7 @@ function disegna() {
         app.innerHTML = vistaBenvenuto();
         return;
     }
-    const viste = { movimenti: vistaMovimenti, bollette: vistaBollette, bitcoin: vistaBitcoin, conti: vistaConti };
+    const viste = { home: vistaHome, movimenti: vistaMovimenti, bollette: vistaBollette, bitcoin: vistaBitcoin, conti: vistaConti };
     const cerca = document.activeElement?.dataset?.campo === 'cerca';
     const posizione = cerca ? document.activeElement.selectionStart : null;
     app.innerHTML = `
@@ -1142,7 +1325,7 @@ function disegnaFoglio() {
     const f = S.foglio;
     const el = document.getElementById('foglio');
     if (!f) { el.innerHTML = ''; return; }
-    const fogli = { menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
+    const fogli = { piramide: foglioPiramide, livello: foglioLivello, menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
     const forma = f.tipo === 'menu' ? 'pannello cassetto' : f.tipo === 'regole' ? 'pannello pieno' : 'pannello';
     el.innerHTML = `<div class="velo" data-az="chiudi"></div><div class="${forma}">${f.tipo === 'menu' ? '' : '<div class="maniglia"></div>'}${fogli[f.tipo](f)}</div>`;
 }
@@ -1256,17 +1439,16 @@ function foglioBitcoin(f) {
 }
 
 function foglioPortafoglio(f) {
-    const v = f.bozza || (f.bozza = { nome: '', valuta: 'EUR', rete: 'onchain', persona: S.persona || pref.io });
+    const v = f.bozza || (f.bozza = { nome: '', valuta: 'EUR', strato: 'cold', persona: S.persona || pref.io });
     return `
         <h2>Nuovo portafoglio<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
         <div class="interruttore">
             <button type="button" class="e${v.valuta === 'EUR' ? ' attivo' : ''}" data-az="valuta" data-val="EUR">€ Euro</button>
             <button type="button" class="u${v.valuta === 'BTC' ? ' attivo' : ''}" data-az="valuta" data-val="BTC">₿ Bitcoin</button>
         </div>
-        ${v.valuta === 'BTC' ? `<div class="campo"><label>Rete</label><div class="chips">
-            <button type="button" class="chip btc${v.rete !== 'LN' ? ' attivo' : ''}" data-az="rete" data-val="onchain">₿ Onchain</button>
-            <button type="button" class="chip btc${v.rete === 'LN' ? ' attivo' : ''}" data-az="rete" data-val="LN">⚡ Lightning</button>
-        </div></div>` : ''}
+        ${v.valuta === 'BTC' ? `<div class="campo"><label>Livello della piramide</label><div class="chips">
+            ${ORDINE_BTC.slice().reverse().map(k => `<button type="button" class="chip btc${v.strato === k ? ' attivo' : ''}" data-az="strato-nuovo" data-val="${k}">${STRATI[k].icona} ${STRATI[k].nome}</button>`).join('')}
+        </div><p class="nota">${esc(STRATI[v.strato]?.ruolo || '')}: ${esc(STRATI[v.strato]?.uso || '')}</p></div>` : ''}
         <div class="campo"><label>Nome</label><input data-campo="nome" value="${esc(v.nome)}" placeholder="${v.valuta === 'BTC' ? 'Es. Phoenix' : 'Es. Conto Revolut'}" autocomplete="off"></div>
         <div class="campo"><label>Di chi</label>
             <input data-campo="persona" list="l-pers" value="${esc(v.persona)}" autocomplete="off">${lista('l-pers', persone())}${chips('persona', persone(), v.persona)}
@@ -1277,12 +1459,47 @@ function foglioPortafoglio(f) {
     `;
 }
 
+function foglioPiramide(f) {
+    const b = f.bozza;
+    const somma = ORDINE_BTC.reduce((t, k) => t + (Number(String(b[k]).replace(',', '.')) || 0), 0);
+    return `
+        <h2>Piramide dei fondi<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Quanta parte dei bitcoin tenere in ogni livello. La base protegge il patrimonio, la punta serve a spendere.</p>
+        <div class="chips">${Object.keys(PRESET).map(n => `<button type="button" class="chip btc${ORDINE_BTC.every(k => Number(b[k]) === PRESET[n][k]) ? ' attivo' : ''}" data-az="preset-piramide" data-val="${esc(n)}">${esc(n)} ${PRESET[n].cold}/${PRESET[n].hot}/${PRESET[n].ln}</button>`).join('')}</div>
+        <div class="obiettivi">${ORDINE_BTC.slice().reverse().map(k => `<div class="campo"><label>${STRATI[k].icona} ${STRATI[k].nome}</label>
+            <div class="con-unita"><input data-campo="${k}" inputmode="decimal" value="${esc(b[k])}"><span>%</span></div></div>`).join('')}</div>
+        <p class="nota">Totale ${somma}%${Math.abs(somma - 100) > 0.5 ? ' · deve fare 100%' : ''}</p>
+        <div class="campo"><label>Euro nella piramide</label>
+            <div class="chips a-capo">${POSIZIONI_FIAT.map(([k, n]) => `<button type="button" class="chip${b.fiat === k ? ' attivo' : ''}" data-az="fiat-pos" data-val="${k}">${n}</button>`).join('')}</div>
+            <p class="nota">Dove mettere i conti in euro: fuori, come liquidità in cima, o come base sotto i bitcoin.</p></div>
+        <div class="campo"><label>Cuscinetto in euro</label>
+            <div class="chips">${[1, 3, 6, 12].map(m => `<button type="button" class="chip${Number(b.mesi) === m ? ' attivo' : ''}" data-az="mesi-cuscinetto" data-val="${m}">${m} ${m === 1 ? 'mese' : 'mesi'}</button>`).join('')}</div>
+            <p class="nota">Mesi di spese da tenere in euro, sulla spesa media degli ultimi 12 mesi (${euroTondo(spesaMensile())}). Oltre, sono euro che possono diventare bitcoin.</p></div>
+        ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
+        <button class="bottone btc" data-az="salva-piramide">Salva</button>
+    `;
+}
+
+function foglioLivello(f) {
+    const p = trovaPortafoglio(f.persona, f.nome);
+    if (!p) return '<p class="nota">Portafoglio non trovato.</p>';
+    return `
+        <h2>${esc(p.nome)}<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">In quale livello della piramide sta? ${p.stratoScelto ? '' : 'Non è ancora stato indicato: per ora è contato come cold.'}</p>
+        ${ORDINE_BTC.slice().reverse().map(k => `<button class="voce-menu livello-scelta${p.strato === k && p.stratoScelto ? ' attivo' : ''}" data-az="metti-strato" data-val="${k}">
+            <b>${STRATI[k].icona}</b><span>${STRATI[k].nome}<small>${esc(STRATI[k].uso)} · es. ${esc(STRATI[k].esempi)}</small></span></button>`).join('')}
+        <p class="nota">Scrive il livello in <code>${esc(p.cartella)}/portafoglio.json</code>. Lightning vuol dire che i sats ricevuti lì sono pagamenti, non acquisti.</p>
+        <button class="bottone secondario" data-az="vedi-movimenti">Vedi i movimenti</button>
+    `;
+}
+
 function foglioMenu() {
     const sospese = tutti('fiat').filter(daClassificare).length;
     return `
         <h2>Bilancio</h2>
         <button class="voce-menu" data-az="regole"><b>⇄</b><span>Regole delle categorie<small>${regole().length} regole${sospese ? ` · ${sospese} da classificare` : ''}</small></span></button>
         <button class="voce-menu" data-az="importa"><b>⇩</b><span>Importa movimenti<small>BBVA, Phoenix, BlueWallet…</small></span></button>
+        <button class="voce-menu" data-az="cfg-piramide"><b>△</b><span>Piramide dei fondi<small>Obiettivi, posizione degli euro, cuscinetto</small></span></button>
         <button class="voce-menu" data-az="impostazioni"><b>⚙</b><span>Impostazioni</span></button>
         <button class="voce-menu" data-az="ricarica"><b>↻</b><span>Rileggi i file</span></button>
     `;
@@ -1643,7 +1860,47 @@ const azioni = {
     apri: (v, el) => { apriFoglio({ tipo: el.dataset.tipo, mov: trova(el.dataset.tipo, el.dataset.id) }); return false; },
     impostazioni: () => { apriFoglio({ tipo: 'impostazioni' }); return false; },
     menu: () => { apriFoglio({ tipo: 'menu' }); return false; },
-    'nuovo-portafoglio': () => { apriFoglio({ tipo: 'portafoglio' }); return false; },
+    'nuovo-portafoglio': v => {
+        apriFoglio({ tipo: 'portafoglio', bozza: v ? { nome: '', valuta: v === 'fiat' ? 'EUR' : 'BTC', strato: v === 'fiat' ? 'cold' : v, persona: S.persona || pref.io } : null });
+        return false;
+    },
+    strato: v => { S.strato = v; },
+    'cfg-piramide': () => {
+        const c = configPiramide();
+        apriFoglio({ tipo: 'piramide', bozza: { ...c.obiettivi, fiat: c.fiat, mesi: c.mesi } });
+        return false;
+    },
+    'preset-piramide': v => { leggiBozza(); Object.assign(S.foglio.bozza, PRESET[v]); S.foglio.errore = ''; disegnaFoglio(); return false; },
+    'fiat-pos': v => { leggiBozza(); S.foglio.bozza.fiat = v; disegnaFoglio(); return false; },
+    'mesi-cuscinetto': v => { leggiBozza(); S.foglio.bozza.mesi = Number(v); disegnaFoglio(); return false; },
+    'salva-piramide': () => {
+        leggiBozza();
+        const f = S.foglio, b = f.bozza;
+        const obiettivi = Object.fromEntries(ORDINE_BTC.map(k => [k, Number(String(b[k]).replace(',', '.'))]));
+        if (Object.values(obiettivi).some(x => !Number.isFinite(x) || x < 0)) { f.errore = 'Ogni obiettivo è una percentuale da 0 a 100'; disegnaFoglio(); return false; }
+        const somma = Object.values(obiettivi).reduce((t, x) => t + x, 0);
+        if (Math.abs(somma - 100) > 0.5) { f.errore = `Gli obiettivi sommano a ${somma}%, non a 100%`; disegnaFoglio(); return false; }
+        try { salvaConfigPiramide({ obiettivi, fiat: b.fiat, mesi: b.mesi }); } catch (e) { f.errore = e.message; disegnaFoglio(); return false; }
+        chiudiFoglio();
+        avvisa('Piramide aggiornata');
+        return true;
+    },
+    'livello-wallet': (v, el) => { apriFoglio({ tipo: 'livello', persona: el.dataset.persona, nome: v }); return false; },
+    'metti-strato': v => {
+        const f = S.foglio, p = trovaPortafoglio(f.persona, f.nome);
+        try { cambiaStrato(p, v); } catch (e) { avvisa(e.message); return false; }
+        chiudiFoglio();
+        S.strato = v;
+        avvisa(`${p.nome} → ${STRATI[v].nome}`);
+        return true;
+    },
+    'vedi-movimenti': () => {
+        const f = S.foglio;
+        S.conto = f.nome; S.persona = f.persona; S.tab = 'bitcoin';
+        chiudiFoglio();
+        window.scrollTo(0, 0);
+        return true;
+    },
     importa: () => { apriFoglio({ tipo: 'importa', fonte: 'bbva', persona: S.persona || pref.io, conto: 'BBVA', testo: null }); return false; },
     chiudi: () => { chiudiFoglio(); return false; },
     verso: v => {
@@ -1656,12 +1913,12 @@ const azioni = {
         return false;
     },
     valuta: v => { leggiBozza(); S.foglio.bozza.valuta = v; disegnaFoglio(); return false; },
-    rete: v => { leggiBozza(); S.foglio.bozza.rete = v; disegnaFoglio(); return false; },
+    'strato-nuovo': v => { leggiBozza(); S.foglio.bozza.strato = v; disegnaFoglio(); return false; },
     'crea-portafoglio': () => {
         leggiBozza();
         const b = S.foglio.bozza;
         try {
-            const p = creaPortafoglio(b.persona, b.nome, b.valuta, b.rete);
+            const p = creaPortafoglio(b.persona, b.nome, b.valuta, b.strato);
             chiudiFoglio();
             avvisa(`Portafoglio ${p.cartella} creato`);
             return true;
@@ -1829,7 +2086,7 @@ window.indietro = () => {
     if (S.foglio) { chiudiFoglio(); return true; }
     if (pronto() && S.conto) { S.conto = ''; S.persona = ''; disegna(); return true; }
     if (pronto() && S.tab === 'bollette' && S.bolTipo) { S.bolTipo = ''; disegna(); return true; }
-    if (pronto() && S.tab !== 'movimenti') { S.tab = 'movimenti'; disegna(); return true; }
+    if (pronto() && S.tab !== 'home') { S.tab = 'home'; disegna(); return true; }
     return false;
 };
 

@@ -301,3 +301,34 @@ button { cursor: pointer; border: none; background: none; }
 .piramide .p-nome { font-size: 4.2px; font-weight: 600; fill: var(--testo); }
 .piramide .p-quota { fill: var(--tenue); font-weight: 400; }
 .piramide .p-valore { font-size: 3.6px; fill: var(--tenue); }
+
+/* Home: the funds pyramid */
+.nav { grid-template-columns: repeat(5, 1fr); }
+.totale-btc .patrimonio { color: var(--testo); }
+.piramide .testa-grafico { display: flex; justify-content: space-between; align-items: center; }
+.piramide .allineamento { display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; color: var(--tenue); }
+.icona.piccola { width: 2rem; height: 2rem; font-size: 1rem; }
+.disegno-piramide { width: 100%; margin-top: 0.3rem; overflow: visible; }
+.disegno-piramide .piano { cursor: pointer; }
+.piramide .p-nome { font-size: 4.2px; font-weight: 700; fill: var(--testo); }
+.piramide .p-quota { fill: var(--testo); font-weight: 400; }
+.piramide .p-troppo { fill: var(--uscita); font-weight: 700; }
+.piramide .p-valore { font-size: 3.5px; fill: var(--tenue); }
+.piramide .p-obiettivo { font-size: 3.2px; fill: var(--tenue); opacity: 0.8; }
+.piramide .legenda { font-size: 0.72rem; margin: 0.3rem 0 0; }
+.consiglio { width: 100%; display: flex; gap: 0.7rem; align-items: flex-start; text-align: left; padding: 0.7rem 0.75rem; margin-bottom: 0.4rem; border-radius: 0.8rem; background: var(--superficie); border: 1px solid var(--superficie-2); font-size: 0.88rem; }
+.consiglio:active { background: var(--superficie-2); }
+.consiglio > b { flex: none; width: 1.6rem; height: 1.6rem; border-radius: 50%; display: grid; place-items: center; background: var(--superficie-2); color: var(--btc); font-size: 0.85rem; }
+.equilibrio { color: var(--entrata); }
+.livello { margin-top: 1rem; box-shadow: inset 4px 0 0 var(--c); }
+.testa-livello { display: flex; flex-direction: column; margin-bottom: 0.5rem; }
+.testa-livello b { font-size: 1.1rem; }
+.testa-livello small { text-transform: none; letter-spacing: 0; }
+.livello dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; font-size: 0.85rem; margin-bottom: 0.6rem; }
+.livello dt { color: var(--tenue); }
+.livello .riga-cat { width: 100%; text-align: left; }
+.obiettivi { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+.con-unita { display: flex; align-items: center; gap: 0.3rem; }
+.con-unita input { min-width: 0; }
+.livello-scelta.attivo { background: var(--superficie-2); }
+.livello small { text-transform: none; letter-spacing: 0; }
