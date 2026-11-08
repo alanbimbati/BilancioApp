@@ -114,7 +114,7 @@ button { cursor: pointer; border: none; background: none; }
 
 .nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-    display: grid; grid-template-columns: repeat(4, 1fr);
+    display: grid; grid-template-columns: 1fr 5.5rem 1fr; align-items: end;
     padding-bottom: var(--basso); background: var(--sfondo); border-top: 1px solid var(--superficie-2);
 }
 .nav button { padding: 0.6rem 0 0.7rem; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 0.1rem; color: var(--tenue); font-size: 0.72rem; }
@@ -303,7 +303,6 @@ button { cursor: pointer; border: none; background: none; }
 .piramide .p-valore { font-size: 3.6px; fill: var(--tenue); }
 
 /* Home: the funds pyramid */
-.nav { grid-template-columns: repeat(5, 1fr); }
 .totale-btc .patrimonio { color: var(--testo); }
 .piramide .testa-grafico { display: flex; justify-content: space-between; align-items: center; }
 .piramide .allineamento { display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; color: var(--tenue); }
@@ -387,3 +386,40 @@ p.avviso-finanza { display: block; }
 .tour-passo { font-size: 0.72rem; font-weight: 700; color: var(--tenue); }
 .tour-salta { margin-left: auto; color: var(--tenue); font-weight: 700; font-size: 0.8rem; text-decoration: underline; }
 .tour-avanti { padding: 0.55rem 1.3rem; border-radius: 0.7rem; background: var(--btc); color: #111; font-weight: 800; }
+
+/* Bottom app bar with the centred action, Material style */
+.nav { overflow: visible; }
+.nav .fab-centro {
+    justify-self: center; align-self: start; margin-top: -1.6rem; width: 3.9rem; height: 3.9rem; padding: 0;
+    border-radius: 1.2rem; display: grid; place-items: center; font-size: 2.1rem; font-weight: 300; line-height: 1;
+    background: var(--btc); color: #111;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 6px 16px rgba(245, 158, 11, 0.28);
+    transition: transform 0.12s;
+}
+.nav .fab-centro:active { transform: scale(0.94); }
+
+/* Today against the profile */
+.link-confronto { display: block; width: 100%; text-align: center; margin-top: 0.55rem; padding: 0.55rem; border-radius: 0.7rem; background: var(--superficie-2); color: var(--testo); font-size: 0.85rem; font-weight: 600; }
+.link { color: var(--fiat); font-size: 0.78rem; text-transform: none; letter-spacing: 0; font-weight: 600; }
+.confronto-scheda { margin: 0.25rem 0 0.75rem; }
+.confronto { width: 100%; display: block; }
+.confronto text { text-anchor: middle; }
+.confronto .c-titolo { font-size: 4px; font-weight: 700; fill: var(--tenue); text-transform: uppercase; letter-spacing: 0.2px; }
+.confronto .c-nome { font-size: 4px; font-weight: 700; fill: var(--testo); }
+.confronto .c-valori { font-size: 3.6px; fill: var(--tenue); }
+.confronto .c-delta { font-size: 4px; font-weight: 700; fill: var(--tenue); }
+.confronto .c-delta.su { fill: var(--entrata); }
+.confronto .c-delta.giu { fill: var(--uscita); }
+.mosse { list-style: none; display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.5rem; font-size: 0.85rem; }
+.mosse li { padding: 0.45rem 0.6rem; border-radius: 0.6rem; background: var(--superficie-2); }
+.mosse li::before { content: '⇄ '; color: var(--btc); }
+
+/* Accounts on the home */
+.riga-conto { width: 100%; display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem 0; text-align: left; border-bottom: 1px solid var(--superficie-2); }
+.riga-conto:last-of-type { border-bottom: none; }
+.riga-conto .setup-icona { width: 2.1rem; height: 2.1rem; font-size: 1rem; }
+.riga-conto .testo { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.riga-conto .testo small, .riga-conto .cifra small { color: var(--tenue); font-size: 0.74rem; }
+.riga-conto .cifra { display: flex; flex-direction: column; align-items: flex-end; white-space: nowrap; }
+.pannello .livello { margin-top: 0; box-shadow: none; }
+.pannello .livello h2 { color: var(--c); }
