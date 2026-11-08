@@ -921,23 +921,78 @@ const STRATI = {
 };
 const ORDINE_BTC = ['ln', 'hot', 'cold'];
 const POSIZIONI_FIAT = [['fuori', 'Fuori'], ['cima', 'In cima'], ['hot', 'Sopra 🔥'], ['cold', 'Sopra ❄'], ['base', 'Alla base']];
-const PRESET = {
-    Ortix: { cold: 80, hot: 15, ln: 5 },
-    'Più sicurezza': { cold: 90, hot: 8, ln: 2 },
-    'Più liquidità': { cold: 65, hot: 25, ln: 10 },
+// Past these a layer stops doing its job: a hot wallet is money at risk, and Lightning channels holding
+// more than this are a chore to keep balanced. Lightning also never takes more than a tenth of a small stack.
+const HOT_MAX = 10, LN_MAX = 1000, LN_QUOTA_MAX = 0.1;
+const NON_CONSIGLIO = 'Non è un consiglio finanziario: è un esempio di come organizzare i fondi, da adattare alla tua situazione.';
+
+const SETUP = {
+    inizio: {
+        nome: 'Alle prime armi', icona: '🌱', hot: 0, ln: 0, mesi: 3, fiat: 'fuori', fiatMax: false,
+        breve: 'Un PAC verso il cold wallet: si costruisce la base, senza spendere.',
+        per: 'Chi ha appena iniziato, o ha meno di sei mesi di acquisti.',
+        regole: ['Tutti i bitcoin nel ❄ cold wallet: niente hot e niente Lightning finché la base non c’è.',
+            'Un PAC (piano di accumulo): la stessa cifra ogni mese, scelta dentro quello che risparmi, qualunque sia il prezzo.',
+            'Tre mesi di spese restano in euro per gli imprevisti.',
+            'Gli altri piani della piramide arrivano dopo, quando la base è solida.'],
+    },
+    ortix: {
+        nome: 'Piramide Ortix', icona: '△', hot: 10, ln: 300, mesi: 3, fiat: 'fuori', fiatMax: false,
+        breve: 'La piramide classica: base cold, poco hot, una punta Lightning per spendere.',
+        per: 'Chi accumula da un po’ e vuole tenere i fondi in ordine.',
+        regole: ['❄ Cold wallet: il grosso, con le chiavi offline.',
+            `🔥 Hot wallet: al massimo il ${HOT_MAX}%, perché sono fondi più esposti.`,
+            '⚡ Lightning: qualche centinaio di euro per spendere, mai più di 1.000 €.',
+            'Tre mesi di spese in euro.'],
+    },
+    negativo: {
+        nome: 'In perdita', icona: '🧊', hot: 5, ln: 100, mesi: 6, fiat: 'fuori', fiatMax: false,
+        breve: 'Sotto il prezzo medio: si continua ad accumulare con gli euro che avanzano, spendendo poco.',
+        per: 'Chi oggi ha bitcoin che valgono meno di quanto li ha pagati.',
+        regole: ['Si continua ad accumulare solo con gli euro oltre il cuscinetto: i soldi delle spese non si toccano.',
+            'Cuscinetto più largo, sei mesi: il periodo si attraversa senza dover vendere.',
+            'Spese sotto la media: si tira avanti spendendo il meno possibile.',
+            'Hot e Lightning al minimo.'],
+    },
+    massimalista: {
+        nome: 'Massimalista', icona: '🟠', hot: 5, ln: 1000, mesi: 1, fiat: 'cima', fiatMax: true,
+        breve: 'In euro al massimo un mese di spese, tutto il resto in bitcoin.',
+        per: 'Chi ha scelto di risparmiare solo in bitcoin.',
+        regole: ['Le spese mensili si stimano dai movimenti degli ultimi 12 mesi.',
+            'In euro al massimo un mese di spese: quello che avanza è un candidato a diventare bitcoin.',
+            'Lightning pieno, fino a 1.000 €, per pagare in sats.',
+            'Hot wallet al 5%.'],
+    },
+    positivo: {
+        nome: 'Vivere in bitcoin', icona: '🚀', hot: 10, ln: 1000, mesi: 2, fiat: 'cima', fiatMax: false,
+        breve: 'Molto in guadagno: la piramide completa, spendendo in sats dalla punta.',
+        per: 'Chi ha bitcoin che valgono almeno il doppio di quanto li ha pagati.',
+        regole: ['La piramide completa: cold alla base, hot al 10% per i mesi a venire, Lightning fino a 1.000 €.',
+            'Le spese di tutti i giorni si pagano dalla punta ⚡, che si ricarica dall’hot wallet.',
+            'Pochi euro, due mesi di spese: si vive da bitcoiner.',
+            'Il cold wallet non si tocca.'],
+    },
 };
+const MIO = { nome: 'Personalizzato', icona: '✎', breve: 'Obiettivi scelti a mano.' };
 // Kept beside the data like the rules, so every phone shows the same targets.
 const FILE_PIRAMIDE = 'piramide.json';
-// Money moved, not spent: buying bitcoin out of the bank account is not a cost of living.
+// Money moved, not earned or spent: buying bitcoin out of the bank account is not a cost of living.
 const NON_SPESA = /bitcoin|btc|investiment|giroconto|trasferiment|risparmi/i;
+
+const tra = (x, min, max, def) => (Number.isFinite(Number(x)) && x !== '' && x !== null ? Math.min(max, Math.max(min, Number(x))) : def);
 
 function configPiramide() {
     let c = {};
     try { c = JSON.parse(A.leggi(FILE_PIRAMIDE) || '{}'); } catch { c = {}; }
+    const setup = SETUP[c.setup] || c.setup === 'mio' ? c.setup : null;
+    const base = SETUP[setup] || SETUP.ortix;
     return {
-        obiettivi: { ...PRESET.Ortix, ...(c.obiettivi || {}) },
-        fiat: POSIZIONI_FIAT.some(([k]) => k === c.fiat) ? c.fiat : 'fuori',
-        mesi: Number(c.mesi) > 0 ? Number(c.mesi) : 3,
+        setup,
+        hot: tra(c.hot ?? c.obiettivi?.hot, 0, HOT_MAX, base.hot),
+        ln: tra(c.ln, 0, LN_MAX, base.ln),
+        mesi: tra(c.mesi, 1, 24, base.mesi),
+        fiat: POSIZIONI_FIAT.some(([k]) => k === c.fiat) ? c.fiat : base.fiat,
+        fiatMax: typeof c.fiatMax === 'boolean' ? c.fiatMax : base.fiatMax,
     };
 }
 
@@ -946,13 +1001,20 @@ function salvaConfigPiramide(c) {
     if (errore) throw new Error(errore);
 }
 
-// The average of the last twelve full months that have any movement, so a ledger started in March is not diluted.
-function spesaMensile() {
+function usaSetup(k) {
+    const s = SETUP[k];
+    salvaConfigPiramide({ setup: k, hot: s.hot, ln: s.ln, mesi: s.mesi, fiat: s.fiat, fiatMax: s.fiatMax });
+}
+
+// Averages of the last twelve full months that have any movement, so a ledger started in March is not diluted.
+function medieMensili() {
     const ora = oggi().slice(0, 7), dal = spostaMese(ora, -12);
     const nel = tutti('fiat').filter(filtroPersona).filter(m => { const ym = m.data.slice(0, 7); return ym >= dal && ym < ora; });
     const mesi = new Set(nel.map(m => m.data.slice(0, 7))).size;
-    const spese = -nel.filter(m => m.importo < 0 && !NON_SPESA.test(`${m.tipologia} ${m.categoria}`)).reduce((s, m) => s + m.importo, 0);
-    return mesi ? spese / mesi : 0;
+    const vere = nel.filter(m => !NON_SPESA.test(`${m.tipologia} ${m.categoria}`));
+    const spese = -vere.filter(m => m.importo < 0).reduce((s, m) => s + m.importo, 0);
+    const entrate = vere.filter(m => m.importo > 0).reduce((s, m) => s + m.importo, 0);
+    return mesi ? { spesa: spese / mesi, risparmio: (entrate - spese) / mesi } : { spesa: 0, risparmio: 0 };
 }
 
 function statoPiramide() {
@@ -968,25 +1030,50 @@ function statoPiramide() {
     }
     for (const s of Object.values(strati)) s.wallet.sort((a, b) => b.saldo - a.saldo);
     const btcTot = ORDINE_BTC.reduce((t, k) => t + strati[k].valore, 0);
-    const somma = ORDINE_BTC.reduce((t, k) => t + Math.max(0, Number(cfg.obiettivi[k]) || 0), 0) || 1;
+
+    // Targets are amounts, not fixed shares: Lightning is a few hundred euro whatever the stack, the hot
+    // wallet a capped slice of it, the cold wallet everything else.
+    const lnEuro = prezzo ? Math.min(cfg.ln, LN_MAX, btcTot * prezzo * LN_QUOTA_MAX) : 0;
+    strati.ln.obiettivoEuro = lnEuro;
+    strati.ln.target = prezzo ? lnEuro / prezzo : 0;
+    strati.hot.target = (btcTot * cfg.hot) / 100;
+    strati.cold.target = Math.max(0, btcTot - strati.hot.target - strati.ln.target);
     for (const k of ORDINE_BTC) {
-        strati[k].obiettivo = (Math.max(0, Number(cfg.obiettivi[k]) || 0) / somma) * 100;
-        strati[k].quota = btcTot > 0 ? (strati[k].valore / btcTot) * 100 : 0;
-        strati[k].riempito = strati[k].obiettivo > 0 ? strati[k].quota / strati[k].obiettivo : strati[k].quota > 0 ? 2 : 0;
+        const s = strati[k];
+        s.obiettivo = btcTot > 0 ? (s.target / btcTot) * 100 : 0;
+        s.quota = btcTot > 0 ? (s.valore / btcTot) * 100 : 0;
+        s.riempito = s.target > 0 ? s.valore / s.target : s.valore > 0 ? 2 : 0;
     }
-    const spesa = spesaMensile();
+    const { spesa, risparmio } = medieMensili();
     const cuscinetto = spesa * cfg.mesi;
     const f = strati.fiat;
     f.mesiCoperti = spesa > 0 ? f.valore / spesa : null;
     f.riempito = cuscinetto > 0 ? f.valore / cuscinetto : f.valore > 0 ? 1 : 0;
+    f.troppo = cuscinetto > 0 && (cfg.fiatMax ? f.valore > cuscinetto * 1.05 + 50 : f.valore > cuscinetto * 1.25 + 200);
+
+    const tx = tutti('bitcoin').filter(filtroPersona);
+    const investiti = tx.reduce((t, m) => t + m.euro, 0);
+    const guadagnoPct = prezzo && investiti > 0 ? ((btcTot * prezzo) / investiti - 1) * 100 : null;
+    const mesiAcquisto = new Set(tx.filter(m => m.bitcoin > 0 && m.euro > 0).map(m => m.data.slice(0, 7))).size;
+    const consigliato = btcTot <= 0 || mesiAcquisto < 6 ? 'inizio'
+        : guadagnoPct !== null && guadagnoPct < 0 ? 'negativo'
+        : guadagnoPct !== null && guadagnoPct >= 100 ? 'positivo' : 'ortix';
+
     // 100% when every layer holds exactly its share, 0% when all the bitcoin sits in a layer meant to be empty.
     const allineamento = btcTot > 0 ? 100 - ORDINE_BTC.reduce((t, k) => t + Math.abs(strati[k].quota - strati[k].obiettivo), 0) / 2 : null;
     const ordine = [...ORDINE_BTC];
     if (cfg.fiat === 'cima') ordine.unshift('fiat');
     else if (cfg.fiat === 'base') ordine.push('fiat');
     else if (cfg.fiat !== 'fuori') ordine.splice(ordine.indexOf(cfg.fiat), 0, 'fiat');
-    return { cfg, prezzo, strati, btcTot, spesa, cuscinetto, allineamento, ordine };
+    return { cfg, prezzo, strati, btcTot, spesa, risparmio, cuscinetto, investiti, guadagnoPct, consigliato, allineamento, ordine };
 }
+
+function setupDi(k) {
+    return SETUP[k] || MIO;
+}
+
+const fmtPct = x => (x > 0 && x < 1 ? x.toFixed(1).replace('.', ',') : Math.round(x)) + '%';
+const fmtMesi = x => `${x.toFixed(1).replace('.', ',').replace(',0', '')} ${x >= 0.95 && x < 1.05 ? 'mese' : 'mesi'}`;
 
 // Equal floors, so the shape is always Ortix's. How full a floor is says how close it is to its target:
 // a floor filled edge to edge holds its share, one drawn with a dashed edge holds more than it should.
@@ -995,65 +1082,101 @@ function piramide(st) {
     const [cima, alto, cx, mezza] = [4, 22, 36, 34];
     const base = cima + alto * n;
     const larghezza = y => (mezza * (y - cima)) / (base - cima);
-    const fmtPct = x => (x > 0 && x < 1 ? x.toFixed(1).replace('.', ',') : Math.round(x)) + '%';
+    const { cfg, prezzo } = st;
+    const obiettivo = k => {
+        const s = st.strati[k];
+        if (k === 'ln') return prezzo ? `obiettivo fino a ${euroTondo(s.obiettivoEuro)}` : 'obiettivo: serve il prezzo BTC';
+        if (k === 'hot') return `obiettivo ${cfg.hot}%${prezzo && s.target ? ` · ${euroTondo(s.target * prezzo)}` : ''}`;
+        return `obiettivo il resto · ${fmtPct(s.obiettivo)}`;
+    };
     const piani = st.ordine.map((k, i) => {
         const s = st.strati[k], d = STRATI[k];
         const y1 = cima + i * alto, y2 = y1 + alto, a = larghezza(y1), b = larghezza(y2);
         const punti = `${cx - a},${y1} ${cx + a},${y1} ${cx + b},${y2} ${cx - b},${y2}`;
         const pieno = Math.min(1, s.riempito) * b;
-        const troppo = s.riempito > 1.15;
+        const troppo = k === 'fiat' ? s.troppo : s.riempito > 1.15 && s.valore - s.target > st.btcTot * 0.02;
         const scelto = S.strato === k;
         const ym = (y1 + y2) / 2;
         const testo = k === 'fiat'
-            ? [`${d.icona} ${d.nome}`, s.mesiCoperti !== null ? `${s.mesiCoperti.toFixed(1).replace('.', ',')} mesi` : '',
-                euroTondo(s.valore), st.cuscinetto > 0 ? `cuscinetto ${st.cfg.mesi} mesi: ${euroTondo(st.cuscinetto)}` : 'nessuna spesa registrata']
-            : [`${d.icona} ${d.nome}`, fmtPct(s.quota),
-                `${btc(s.valore)}${st.prezzo ? ` · ${euroTondo(s.valore * st.prezzo)}` : ''}`, `obiettivo ${fmtPct(s.obiettivo)}`];
+            ? [`${d.icona} ${d.nome}`, s.mesiCoperti !== null ? fmtMesi(s.mesiCoperti) : '', euroTondo(s.valore),
+                st.cuscinetto > 0 ? `${cfg.fiatMax ? 'al massimo' : 'cuscinetto'} ${fmtMesi(cfg.mesi)}: ${euroTondo(st.cuscinetto)}` : 'nessuna spesa registrata']
+            : [`${d.icona} ${d.nome}`, fmtPct(s.quota), `${btc(s.valore)}${prezzo ? ` · ${euroTondo(s.valore * prezzo)}` : ''}`, obiettivo(k)];
         return `<g data-az="strato" data-val="${k}" class="piano${scelto ? ' scelto' : ''}">
             <clipPath id="pp-${k}"><polygon points="${punti}"/></clipPath>
             <polygon points="${punti}" fill="${d.colore}" fill-opacity="0.16"/>
             <rect x="${cx - pieno}" y="${y1}" width="${pieno * 2}" height="${alto}" fill="${d.colore}" clip-path="url(#pp-${k})"/>
             <polygon points="${punti}" fill="none" stroke="${troppo ? 'var(--uscita)' : scelto ? 'var(--testo)' : 'var(--sfondo)'}" stroke-width="${scelto || troppo ? 0.8 : 0.6}" ${troppo ? 'stroke-dasharray="2 1.2"' : ''}/>
             <line x1="${cx + larghezza(ym) + 1}" x2="69" y1="${ym}" y2="${ym}" stroke="var(--bordo)" stroke-width="0.3"/>
-            <rect x="69" y="${y1}" width="61" height="${alto}" fill="transparent"/>
+            <rect x="69" y="${y1}" width="63" height="${alto}" fill="transparent"/>
             <text x="71" y="${ym - 4.6}" class="p-nome">${esc(testo[0])} <tspan class="${troppo ? 'p-troppo' : 'p-quota'}">${esc(testo[1])}</tspan></text>
             <text x="71" y="${ym + 0.6}" class="p-valore">${esc(testo[2])}</text>
             <text x="71" y="${ym + 5.4}" class="p-obiettivo">${esc(testo[3])}</text>
         </g>`;
     }).join('');
-    return `<svg viewBox="0 0 132 ${base + 2}" class="disegno-piramide">${piani}</svg>`;
+    return `<svg viewBox="0 0 134 ${base + 2}" class="disegno-piramide">${piani}</svg>`;
 }
 
 // Moves between bitcoin layers, each under-filled layer served first by its neighbour: Lightning is topped
 // up from the hot wallet, the hot wallet from the cold one, as the Ortix guide does it by hand.
 function consigliPiramide(st) {
     const out = [];
-    const { strati: s, btcTot, prezzo } = st;
+    const { strati: s, btcTot, prezzo, cfg } = st;
     const inEuro = b => (prezzo ? ` (≈ ${euroTondo(b * prezzo)})` : '');
     if (btcTot > 0) {
         const soglia = Math.max(btcTot * 0.02, 0.0001);
-        const scarto = Object.fromEntries(ORDINE_BTC.map(k => [k, s[k].valore - (btcTot * s[k].obiettivo) / 100]));
+        const scarto = Object.fromEntries(ORDINE_BTC.map(k => [k, s[k].valore - s[k].target]));
         const vicini = { ln: ['hot', 'cold'], hot: ['cold', 'ln'], cold: ['hot', 'ln'] };
         for (const k of [...ORDINE_BTC].sort((a, b) => scarto[a] - scarto[b])) {
             for (const da of vicini[k]) {
                 const quanto = Math.min(-scarto[k], scarto[da]);
                 if (quanto < soglia) continue;
                 scarto[k] += quanto; scarto[da] -= quanto;
-                out.push({ icona: '⇄', testo: `Sposta <b>${btc(quanto)}</b>${inEuro(quanto)} da ${STRATI[da].icona} ${STRATI[da].nome} a ${STRATI[k].icona} ${STRATI[k].nome}`, az: 'strato', val: k });
+                const perche = da === 'ln' && prezzo && s.ln.valore * prezzo > LN_MAX ? ': oltre 1.000 € i canali diventano scomodi da gestire'
+                    : da === 'hot' && s.hot.quota > HOT_MAX ? `: oltre il ${HOT_MAX}% sono troppi fondi esposti` : '';
+                out.push({ icona: '⇄', testo: `Sposta <b>${btc(quanto)}</b>${inEuro(quanto)} da ${STRATI[da].icona} ${STRATI[da].nome} a ${STRATI[k].icona} ${STRATI[k].nome}${perche}`, az: 'strato', val: k });
             }
         }
         if (!s.cold.wallet.length) out.unshift({ icona: '❄', testo: 'La base della piramide è vuota: crea un <b>cold wallet</b> (chiavi offline) per il grosso dei bitcoin.', az: 'nuovo-portafoglio', val: 'cold' });
-        if (!s.ln.wallet.length && s.ln.obiettivo > 0) out.push({ icona: '⚡', testo: 'Nessun wallet <b>Lightning</b>: aggiungine uno per le spese di tutti i giorni.', az: 'nuovo-portafoglio', val: 'ln' });
+        if (!s.ln.wallet.length && s.ln.target > 0) out.push({ icona: '⚡', testo: 'Nessun wallet <b>Lightning</b>: aggiungine uno per le spese di tutti i giorni.', az: 'nuovo-portafoglio', val: 'ln' });
+    } else {
+        out.push({ icona: '❄', testo: 'Nessun bitcoin registrato. La piramide parte dalla base: un <b>cold wallet</b>.', az: 'nuovo-portafoglio', val: 'cold' });
     }
-    const daDire = [...s.cold.wallet].filter(w => !w.p.stratoScelto);
+    const daDire = s.cold.wallet.filter(w => !w.p.stratoScelto);
     if (daDire.length) out.push({ icona: '?', testo: `${daDire.map(w => `<b>${esc(w.p.nome)}</b>`).join(', ')}: livello non indicato, ${daDire.length > 1 ? 'li conto come cold. Toccali se sono hot' : 'lo conto come cold. Toccalo se è hot'}.`, az: 'strato', val: 'cold' });
-    if (st.cuscinetto > 0) {
-        const f = s.fiat.valore, c = st.cuscinetto;
-        if (f < c * 0.9) out.push({ icona: '€', testo: `Il cuscinetto in euro copre <b>${(f / st.spesa).toFixed(1).replace('.', ',')} mesi</b> di spese su ${st.cfg.mesi}: mancano ${euroTondo(c - f)}.`, az: 'strato', val: 'fiat' });
-        else if (f > c * 1.25 + 200) out.push({ icona: '₿', testo: `<b>${euroTondo(f - c)}</b> in euro oltre il cuscinetto di ${st.cfg.mesi} mesi: candidati a diventare bitcoin nel ${STRATI.cold.icona} cold wallet.`, az: 'strato', val: 'fiat' });
+
+    const f = s.fiat.valore, c = st.cuscinetto;
+    if (c > 0 && f < c * 0.9) out.push({ icona: '€', testo: `Gli euro coprono <b>${fmtMesi(f / st.spesa)}</b> di spese su ${fmtMesi(cfg.mesi)}: mancano ${euroTondo(c - f)}.`, az: 'strato', val: 'fiat' });
+    else if (s.fiat.troppo) {
+        out.push(cfg.setup === 'negativo'
+            ? { icona: '🧊', testo: `<b>${euroTondo(f - c)}</b> oltre il cuscinetto di ${fmtMesi(cfg.mesi)}: in questo setup è da qui, e solo da qui, che continua l’accumulo.`, az: 'info-setup', val: 'negativo' }
+            : { icona: '₿', testo: `<b>${euroTondo(f - c)}</b> in euro oltre ${cfg.fiatMax ? 'il massimo' : 'il cuscinetto'} di ${fmtMesi(cfg.mesi)}: candidati a diventare bitcoin nel ❄ cold wallet.`, az: 'strato', val: 'fiat' });
     }
-    if (btcTot > 0 && !prezzo) out.push({ icona: '↻', testo: 'Scarica il prezzo BTC per vedere i livelli in euro.', az: 'prezzo', val: '' });
+    if (cfg.setup === 'inizio' && st.risparmio > 0) out.push({ icona: '🌱', testo: `Risparmi in media <b>${euroTondo(st.risparmio)}</b> al mese: la cifra del PAC verso il ❄ cold wallet si sceglie dentro questa, ogni mese uguale.`, az: 'info-setup', val: 'inizio' });
+    if (cfg.setup === 'negativo' && st.spesa > 0) {
+        const mese = oggi().slice(0, 7);
+        const spese = -tutti('fiat').filter(filtroPersona).filter(m => m.data.startsWith(mese) && m.importo < 0 && !NON_SPESA.test(`${m.tipologia} ${m.categoria}`)).reduce((t, m) => t + m.importo, 0);
+        if (spese > st.spesa * 1.1) out.push({ icona: '🧊', testo: `Questo mese hai speso <b>${euroTondo(spese)}</b>, sopra la tua media di ${euroTondo(st.spesa)}.`, az: 'tab', val: 'movimenti' });
+    }
+    if (cfg.setup === 'positivo' && s.ln.wallet.length) out.push({ icona: '🚀', testo: 'Paga le spese di tutti i giorni dalla punta ⚡ e ricaricala dall’🔥 hot wallet quando si svuota.', az: 'strato', val: 'ln' });
+    if (btcTot > 0 && !prezzo) out.push({ icona: '↻', testo: 'Scarica il prezzo BTC: gli obiettivi dipendono dagli importi in euro.', az: 'prezzo', val: '' });
     return out;
+}
+
+function schedaSetup(st) {
+    const k = st.cfg.setup, s = setupDi(k), c = SETUP[st.consigliato];
+    if (!k) return `<div class="scheda setup da-scegliere" data-tour="setup">
+        <div class="setup-riga"><span class="setup-icona">${c.icona}</span>
+            <span class="setup-testo"><small>Scegli un setup</small><b>Ai tuoi dati somiglia: ${esc(c.nome)}</b><span>${esc(c.breve)}</span></span>
+            <button class="info" data-az="info-setup" data-val="${st.consigliato}" aria-label="Cosa significa">!</button></div>
+        <div class="affiancati"><button class="bottone btc" data-az="usa-setup" data-val="${st.consigliato}">Usa ${esc(c.nome)}</button>
+            <button class="bottone secondario" data-az="scegli-setup">Vedi tutti</button></div>
+    </div>`;
+    return `<div class="scheda setup" data-tour="setup">
+        <div class="setup-riga"><button class="setup-apri" data-az="scegli-setup"><span class="setup-icona">${s.icona}</span>
+            <span class="setup-testo"><small>Il tuo setup ›</small><b>${esc(s.nome)}</b><span>${esc(s.breve)}</span></span></button>
+            ${SETUP[k] ? `<button class="info" data-az="info-setup" data-val="${k}" aria-label="Cosa significa">!</button>` : ''}</div>
+        ${st.consigliato !== k ? `<button class="setup-somiglia" data-az="info-setup" data-val="${st.consigliato}">I tuoi dati oggi somigliano a ${c.icona} <b>${esc(c.nome)}</b> ›</button>` : ''}
+    </div>`;
 }
 
 function vistaHome() {
@@ -1072,26 +1195,36 @@ function vistaHome() {
     const wallet = dati.wallet.map(({ p, saldo }) => `<button class="riga-cat conto" data-az="${p.tipo === 'bitcoin' ? 'livello-wallet' : 'apri-conto'}" data-val="${esc(p.nome)}" data-persona="${esc(p.persona)}">
             <div class="nome"><span>${esc(p.nome)}${persone().length > 1 ? ` <small style="color:var(--tenue)">${esc(p.persona)}</small>` : ''}${p.tipo === 'bitcoin' && !p.stratoScelto ? ' <small class="arancio">livello?</small>' : ''}</span>
             <span class="${saldo < 0 ? 'negativo' : ''}">${p.tipo === 'fiat' ? euro(saldo) : btc(saldo)}</span></div>
-            ${p.tipo === 'bitcoin' && prezzo ? `<small>≈ ${euroTondo(Math.max(0, saldo) * prezzo)} · tocca per cambiare livello</small>` : ''}
+            <small>${p.tipo === 'bitcoin' ? `${prezzo ? `≈ ${euroTondo(Math.max(0, saldo) * prezzo)} · ` : ''}tocca per cambiare livello` : 'tocca per i movimenti'}</small>
         </button>`).join('');
 
+    const primiPassi = S.portafogli.size ? '' : `<div class="scheda primi-passi">
+        <b>Primi passi</b>
+        <p class="nota">Ogni conto o wallet è un portafoglio. Crea quelli che usi davvero: i movimenti si aggiungono poi col +.</p>
+        <div class="affiancati"><button class="bottone secondario" data-az="nuovo-portafoglio" data-val="fiat">+ Conto in €</button>
+            <button class="bottone btc" data-az="nuovo-portafoglio" data-val="cold">+ Cold wallet ❄</button></div>
+    </div>`;
+
     return `
-        <div class="totale-btc">
+        <div class="totale-btc" data-tour="totale">
             <small>Patrimonio${S.persona ? ` di ${esc(S.persona)}` : ''}</small>
             <strong class="patrimonio">${prezzo ? euroTondo(fiat + btcTot * prezzo) : btc(btcTot)}</strong>
             <span>${btc(btcTot)} · ${euroTondo(fiat)}</span>
         </div>
         ${chipsPersone(true)}
-        <div class="scheda piramide">
+        ${primiPassi}
+        ${schedaSetup(st)}
+        <div class="scheda piramide" data-tour="piramide">
             <div class="testa-grafico"><small>Piramide dei fondi</small>
                 <span class="allineamento">${st.allineamento !== null ? `<b class="${st.allineamento >= 90 ? 'positivo' : st.allineamento >= 70 ? 'arancio' : 'negativo'}">${Math.round(st.allineamento)}%</b> in equilibrio` : ''}
                 <button class="icona piccola" data-az="cfg-piramide" aria-label="Obiettivi della piramide">⚙</button></span></div>
             ${piramide(st)}
-            <p class="nota legenda">Piano pieno = obiettivo raggiunto · bordo rosso tratteggiato = troppi fondi lì</p>
+            <p class="nota legenda">Piano pieno = obiettivo raggiunto · bordo rosso tratteggiato = troppi fondi lì · tocca un piano</p>
         </div>
-        <div class="sezione"><span>Cosa fare</span></div>
+        <div class="sezione" data-tour="consigli"><span>Cosa fare</span></div>
         ${consigli.length ? consigli.map(c => `<button class="consiglio" data-az="${c.az}" data-val="${esc(c.val)}"><b>${c.icona}</b><span>${c.testo}</span></button>`).join('')
-            : '<p class="nota equilibrio">✓ La piramide rispetta gli obiettivi. Niente da spostare.</p>'}
+            : '<p class="nota equilibrio">✓ La piramide rispetta gli obiettivi del setup. Niente da spostare.</p>'}
+        <p class="nota piccola">Indicazioni per tenere la piramide coerente col setup scelto. ${NON_CONSIGLIO}</p>
         <div class="scheda livello" style="--c:${scelto.colore}">
             <div class="testa-livello"><b>${scelto.icona} ${scelto.nome}</b><small>${esc(scelto.ruolo)}</small></div>
             <dl>
@@ -1101,7 +1234,7 @@ function vistaHome() {
                 <dt>Concetto</dt><dd>${esc(scelto.concetto)}</dd>
             </dl>
             ${wallet || '<p class="nota vuota">Nessun portafoglio in questo livello.</p>'}
-            <button class="bottone secondario" data-az="nuovo-portafoglio" data-val="${S.strato}">+ Portafoglio ${scelto.icona}</button>
+            <button class="bottone secondario" data-az="nuovo-portafoglio" data-val="${S.strato}">+ ${S.strato === 'fiat' ? 'Conto in €' : `Portafoglio ${scelto.icona}`}</button>
         </div>
         <div class="sezione"><span>${nomeMese(mese)}</span></div>
         <div class="riassunto">
@@ -1110,6 +1243,102 @@ function vistaHome() {
             <div class="scheda"><small>Spesa media</small><strong>${st.spesa ? euroTondo(st.spesa) : '—'}</strong></div>
         </div>
     `;
+}
+
+// ---------- tutorial ----------
+
+// Barattolo's welcome tour: a dark veil, a spotlight on one thing at a time and a bubble that says what it is.
+// A step whose target is not on screen is left out, so the tour never gets stuck.
+const q = s => document.querySelector(s);
+const TAPPE = [
+    { trova: () => q('[data-tour=totale]'), testo: '👋 <b>Benvenuto in Bilancio!</b> Qui c’è tutto il patrimonio: euro e bitcoin insieme, al prezzo di oggi.' },
+    { trova: () => q('[data-tour=setup]'), testo: 'Il <b>setup</b> è un modo d’esempio di organizzare i fondi: alle prime armi, massimalista, in perdita… Tocca <b>!</b> per sapere cosa significa ognuno.' },
+    { trova: () => q('[data-tour=piramide]'), testo: '△ La <b>piramide dei fondi</b>: ❄ cold wallet alla base, 🔥 hot wallet in mezzo, ⚡ Lightning in punta. Un piano pieno ha raggiunto il suo obiettivo. Tocca un piano per i dettagli.' },
+    { trova: () => q('[data-az=cfg-piramide]'), tondo: true, testo: '⚙ Qui scegli gli obiettivi a mano e dove mettere gli <b>euro</b> nella piramide.' },
+    { trova: () => q('[data-tour=consigli]'), testo: '<b>Cosa fare</b>: gli spostamenti per tenere la piramide in equilibrio. Sono indicazioni, non consigli finanziari.' },
+    { trova: () => q('.nav [data-val=movimenti]'), testo: '€ <b>Movimenti</b>: entrate e uscite. Il <b>+</b> aggiunge una spesa in pochi tocchi, con la categoria suggerita.' },
+    { trova: () => q('.nav [data-val=bitcoin]'), testo: '₿ <b>Bitcoin</b>: acquisti, prezzo medio e quanto valgono oggi.' },
+    { trova: () => q('.nav [data-val=conti]'), testo: '▣ <b>Conti</b>: i portafogli. Ognuno è una cartella con un file CSV per anno, leggibile anche senza l’app.' },
+    { trova: () => q('.testata [data-az=menu]'), tondo: true, testo: '☰ Dal menu: <b>sincronizzazione e backup</b>, import da banca e wallet, regole delle categorie e questo tutorial. Buon bilancio! 🎉' },
+];
+let tour = null;
+
+function avviaTour() {
+    chiudiFoglio();
+    if (S.tab !== 'home') { S.tab = 'home'; disegna(); }
+    const tappe = TAPPE.filter(t => t.trova());
+    if (!tappe.length) return;
+    tour = { tappe, i: 0 };
+    scriviLocale('bilancio.tour', true);
+    window.addEventListener('resize', posizionaTour);
+    mostraTappa();
+}
+
+function mostraTappa() {
+    const el = document.getElementById('tour');
+    const t = tour.tappe[tour.i], b = t.trova();
+    if (!b) { avantiTour(); return; }
+    const ultima = tour.i === tour.tappe.length - 1;
+    el.hidden = false;
+    el.innerHTML = `<div class="tour-luce${t.tondo ? ' tondo' : ''}"></div>
+        <div class="tour-fumetto"><span>${t.testo}</span>
+            <div class="tour-az"><span class="tour-passo">${tour.i + 1} di ${tour.tappe.length}</span>
+                <button class="tour-salta" data-az="tour-salta">Salta</button>
+                <button class="tour-avanti" data-az="tour-avanti">${ultima ? 'Fine 🎉' : 'Avanti'}</button></div></div>`;
+    const r = b.getBoundingClientRect();
+    if (r.top < 70 || r.bottom > innerHeight - 90) b.scrollIntoView({ block: 'center' });
+    posizionaTour();
+}
+
+function posizionaTour() {
+    if (!tour) return;
+    const b = tour.tappe[tour.i].trova();
+    const luce = q('#tour .tour-luce'), f = q('#tour .tour-fumetto');
+    if (!b || !luce || !f) return;
+    const r = b.getBoundingClientRect(), R = 6;
+    Object.assign(luce.style, { top: `${r.top - R}px`, left: `${r.left - R}px`, width: `${r.width + 2 * R}px`, height: `${Math.min(r.bottom + R, innerHeight - 3) - (r.top - R)}px` });
+    const fw = f.offsetWidth, fh = f.offsetHeight;
+    let top = r.bottom + R + 12;
+    if (top + fh > innerHeight - 12) top = r.top - R - fh - 12;
+    if (top < 12) top = Math.max(12, innerHeight - fh - 12);
+    const left = Math.max(12, Math.min(r.left + r.width / 2 - fw / 2, innerWidth - fw - 12));
+    Object.assign(f.style, { top: `${top}px`, left: `${left}px` });
+}
+
+function avantiTour() {
+    tour.i++;
+    if (tour.i >= tour.tappe.length) chiudiTour();
+    else mostraTappa();
+}
+
+function chiudiTour() {
+    tour = null;
+    window.removeEventListener('resize', posizionaTour);
+    const el = document.getElementById('tour');
+    el.hidden = true;
+    el.innerHTML = '';
+    window.scrollTo(0, 0);
+}
+
+// ---------- where the data lives ----------
+
+// The app has no server, so whether the files survive a lost phone depends on how the folder is synced.
+function guidaSync(aperta = false) {
+    return `<div class="opzioni-sync">
+        <div class="opzione consigliata"><b>🔄 Syncthing</b><small>consigliato</small>
+            <p>Copia la cartella tra telefono, PC e Raspberry direttamente, senza passare da un cloud. Gratis e open source.</p></div>
+        <div class="opzione"><b>☁ Cloud</b>
+            <p>Nextcloud, Google Drive o Dropbox, con un’app che tiene sincronizzata una cartella del telefono (FolderSync, Autosync, Dropsync).</p></div>
+        <div class="opzione"><b>📱 Solo sul telefono</b>
+            <p>Funziona, ma se perdi o cambi il telefono perdi anche i dati.</p></div>
+    </div>
+    <details class="come-sync"${aperta ? ' open' : ''}><summary>Come si fa con Syncthing</summary><ol>
+        <li>Installa <b>Syncthing-Fork</b> sul telefono (F-Droid o Play Store) e <b>Syncthing</b> sul PC (syncthing.net).</li>
+        <li>Collega i due dispositivi: sul PC «Aggiungi dispositivo» e inquadra il QR del telefono.</li>
+        <li>Sul telefono crea la cartella <code>Documenti/Casa/Bilancio/dati</code> e condividila col PC.</li>
+        <li>Torna qui e scegli quella cartella. Ogni movimento salvato arriva da solo sugli altri dispositivi.</li>
+        <li>Usa l’app da un dispositivo alla volta: se due modificano lo stesso anno prima di sincronizzarsi, Syncthing tiene due copie e l’app ti avvisa.</li>
+    </ol></details>`;
 }
 
 // ---------- bills ----------
@@ -1233,21 +1462,26 @@ function vistaBenvenuto() {
     const chi = persone();
     return `<div class="benvenuto">
         <h1>Bilancio</h1>
-        <p class="nota">I movimenti restano in file CSV sul telefono, nella cartella che Syncthing tiene allineata con il PC e il Raspberry. Funziona anche senza internet.</p>
+        <p class="nota">Entrate, uscite e bitcoin, con la piramide dei fondi di Ortix. Niente account e niente server: quattro passi e si parte.</p>
         <div class="passo">
-            <h3>${permesso ? '<span class="fatto">✓</span>' : '1.'} Accesso ai file</h3>
-            ${permesso ? '<p class="nota">Concesso.</p>' : `<p class="nota">Serve per leggere e scrivere nella cartella sincronizzata. Nella schermata che si apre, attiva l'interruttore per Bilancio e torna indietro.</p>
-            <button class="bottone" data-az="permesso">Consenti accesso ai file</button>`}
+            <h3><span class="numero">1</span> Dove tenere i dati</h3>
+            <p class="nota">I movimenti sono file CSV in una cartella del telefono, apribili anche con Excel. Perché non si perdano, quella cartella va sincronizzata con un altro dispositivo.</p>
+            ${guidaSync()}
         </div>
         <div class="passo">
-            <h3>${cartella && permesso ? '<span class="fatto">✓</span>' : '2.'} Cartella dei dati</h3>
-            <p class="nota">Scegli la cartella <b>dati</b> dentro <b>Casa/Bilancio</b> (va bene anche Bilancio: la trovo io).</p>
-            ${cartella ? `<p class="nota"><code>${esc(cartella)}</code><br>${S.vecchioFormato ? 'Qui i dati sono ancora nel formato vecchio (fiat/ e bitcoin/): aspetta che Syncthing porti quello nuovo.' : trovati ? `${trovati} movimenti in ${S.portafogli.size} portafogli.` : 'Nessun movimento qui: va bene solo se parti da zero.'}</p>` : ''}
+            <h3>${permesso ? '<span class="fatto">✓</span>' : '<span class="numero">2</span>'} Accesso ai file</h3>
+            ${permesso ? '<p class="nota">Concesso.</p>' : `<p class="nota">Serve per leggere e scrivere nella cartella. Nella schermata che si apre, attiva l'interruttore per Bilancio e torna indietro.</p>
+            <button class="bottone" data-az="permesso">Consenti accesso ai file</button>`}
+        </div>
+        <div class="passo${permesso ? '' : ' spento'}">
+            <h3>${cartella && permesso ? '<span class="fatto">✓</span>' : '<span class="numero">3</span>'} Cartella dei dati</h3>
+            <p class="nota">Scegli la cartella <b>dati</b> (per esempio <b>Documenti/Casa/Bilancio/dati</b>). Se è nuova e vuota va bene: si parte da zero.</p>
+            ${cartella ? `<p class="nota"><code>${esc(cartella)}</code><br>${S.vecchioFormato ? 'Qui i dati sono ancora nel formato vecchio (fiat/ e bitcoin/): aspetta che Syncthing porti quello nuovo.' : trovati ? `${trovati} movimenti in ${S.portafogli.size} portafogli.` : 'Nessun movimento qui: si parte da zero.'}</p>` : ''}
             <button class="bottone ${cartella ? 'secondario' : ''}" data-az="cartella" ${permesso ? '' : 'disabled'}>${cartella ? 'Cambia cartella' : 'Scegli cartella'}</button>
         </div>
         ${cartella && permesso ? `<div class="passo">
-            <h3>3. Chi sei?</h3>
-            <p class="nota">Diventa la persona proposta per i nuovi movimenti.</p>
+            <h3><span class="numero">4</span> Chi sei?</h3>
+            <p class="nota">Diventa la persona proposta per i nuovi movimenti. In famiglia ognuno ha i suoi portafogli, nella stessa cartella.</p>
             <div class="chips">${chi.map(p => `<button class="chip${pref.io === p ? ' attivo' : ''}" data-az="io" data-val="${esc(p)}">${esc(p)}</button>`).join('')}</div>
             <div class="campo"><input placeholder="Oppure scrivi il nome" data-campo="io" value="${esc(chi.includes(pref.io) ? '' : pref.io)}"></div>
             <button class="bottone" data-az="inizia" ${pref.io ? '' : 'disabled'}>Inizia</button>
@@ -1325,7 +1559,7 @@ function disegnaFoglio() {
     const f = S.foglio;
     const el = document.getElementById('foglio');
     if (!f) { el.innerHTML = ''; return; }
-    const fogli = { piramide: foglioPiramide, livello: foglioLivello, menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
+    const fogli = { setup: foglioSetup, infosetup: foglioInfoSetup, sync: foglioSync, piramide: foglioPiramide, livello: foglioLivello, menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
     const forma = f.tipo === 'menu' ? 'pannello cassetto' : f.tipo === 'regole' ? 'pannello pieno' : 'pannello';
     el.innerHTML = `<div class="velo" data-az="chiudi"></div><div class="${forma}">${f.tipo === 'menu' ? '' : '<div class="maniglia"></div>'}${fogli[f.tipo](f)}</div>`;
 }
@@ -1461,22 +1695,69 @@ function foglioPortafoglio(f) {
 
 function foglioPiramide(f) {
     const b = f.bozza;
-    const somma = ORDINE_BTC.reduce((t, k) => t + (Number(String(b[k]).replace(',', '.')) || 0), 0);
     return `
-        <h2>Piramide dei fondi<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
-        <p class="nota">Quanta parte dei bitcoin tenere in ogni livello. La base protegge il patrimonio, la punta serve a spendere.</p>
-        <div class="chips">${Object.keys(PRESET).map(n => `<button type="button" class="chip btc${ORDINE_BTC.every(k => Number(b[k]) === PRESET[n][k]) ? ' attivo' : ''}" data-az="preset-piramide" data-val="${esc(n)}">${esc(n)} ${PRESET[n].cold}/${PRESET[n].hot}/${PRESET[n].ln}</button>`).join('')}</div>
-        <div class="obiettivi">${ORDINE_BTC.slice().reverse().map(k => `<div class="campo"><label>${STRATI[k].icona} ${STRATI[k].nome}</label>
-            <div class="con-unita"><input data-campo="${k}" inputmode="decimal" value="${esc(b[k])}"><span>%</span></div></div>`).join('')}</div>
-        <p class="nota">Totale ${somma}%${Math.abs(somma - 100) > 0.5 ? ' · deve fare 100%' : ''}</p>
+        <h2>Personalizza la piramide<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Gli obiettivi sono importi: il cold wallet prende tutto quello che resta.</p>
+        <div class="griglia2">
+            <div class="campo"><label>🔥 Hot wallet</label><div class="con-unita"><input data-campo="hot" inputmode="decimal" value="${esc(b.hot)}"><span>%</span></div>
+                <small class="aiuto">al massimo ${HOT_MAX}%: sono fondi esposti</small></div>
+            <div class="campo"><label>⚡ Lightning</label><div class="con-unita"><span>€</span><input data-campo="ln" inputmode="numeric" value="${esc(b.ln)}"></div>
+                <small class="aiuto">al massimo ${euroTondo(LN_MAX)}: i canali</small></div>
+        </div>
         <div class="campo"><label>Euro nella piramide</label>
-            <div class="chips a-capo">${POSIZIONI_FIAT.map(([k, n]) => `<button type="button" class="chip${b.fiat === k ? ' attivo' : ''}" data-az="fiat-pos" data-val="${k}">${n}</button>`).join('')}</div>
-            <p class="nota">Dove mettere i conti in euro: fuori, come liquidità in cima, o come base sotto i bitcoin.</p></div>
-        <div class="campo"><label>Cuscinetto in euro</label>
-            <div class="chips">${[1, 3, 6, 12].map(m => `<button type="button" class="chip${Number(b.mesi) === m ? ' attivo' : ''}" data-az="mesi-cuscinetto" data-val="${m}">${m} ${m === 1 ? 'mese' : 'mesi'}</button>`).join('')}</div>
-            <p class="nota">Mesi di spese da tenere in euro, sulla spesa media degli ultimi 12 mesi (${euroTondo(spesaMensile())}). Oltre, sono euro che possono diventare bitcoin.</p></div>
+            <div class="chips a-capo">${POSIZIONI_FIAT.map(([k, n]) => `<button type="button" class="chip${b.fiat === k ? ' attivo' : ''}" data-az="fiat-pos" data-val="${k}">${n}</button>`).join('')}</div></div>
+        <div class="campo"><label>Mesi di spese in euro</label>
+            <div class="chips">${[1, 2, 3, 6, 12].map(m => `<button type="button" class="chip${Number(b.mesi) === m ? ' attivo' : ''}" data-az="mesi-cuscinetto" data-val="${m}">${m}</button>`).join('')}</div>
+            <div class="chips">
+                <button type="button" class="chip${!b.fiatMax ? ' attivo' : ''}" data-az="fiat-max" data-val="">Almeno, come cuscinetto</button>
+                <button type="button" class="chip${b.fiatMax ? ' attivo' : ''}" data-az="fiat-max" data-val="1">Al massimo</button></div>
+            <p class="nota">Spesa media degli ultimi 12 mesi: ${euroTondo(medieMensili().spesa)} (senza acquisti di bitcoin e giroconti).</p></div>
         ${f.errore ? `<p class="errore">${esc(f.errore)}</p>` : ''}
         <button class="bottone btc" data-az="salva-piramide">Salva</button>
+    `;
+}
+
+function foglioSetup() {
+    const st = statoPiramide();
+    return `
+        <h2>Scegli un setup<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Esempi di come organizzare la piramide in situazioni diverse. Tocca <b class="info-testo">!</b> per la spiegazione completa.</p>
+        ${Object.entries(SETUP).map(([k, x]) => `<div class="riga-setup${st.cfg.setup === k ? ' attivo' : ''}">
+            <button class="setup-apri" data-az="usa-setup" data-val="${k}"><span class="setup-icona">${x.icona}</span>
+                <span class="setup-testo"><b>${esc(x.nome)}${st.consigliato === k ? ' <em>somiglia ai tuoi dati</em>' : ''}${st.cfg.setup === k ? ' <em class="in-uso">in uso</em>' : ''}</b><span>${esc(x.breve)}</span></span></button>
+            <button class="info" data-az="info-setup" data-val="${k}" aria-label="Cosa significa ${esc(x.nome)}">!</button>
+        </div>`).join('')}
+        <button class="bottone secondario" data-az="cfg-piramide">✎ Personalizza a mano</button>
+        <p class="nota avviso-finanza">! ${NON_CONSIGLIO}</p>
+    `;
+}
+
+function foglioInfoSetup(f) {
+    const k = f.setup, x = SETUP[k], st = statoPiramide();
+    const lnOggi = st.prezzo ? Math.min(x.ln, LN_MAX, st.btcTot * st.prezzo * LN_QUOTA_MAX) : null;
+    return `
+        <h2>${x.icona} ${esc(x.nome)}<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">${esc(x.breve)}</p>
+        <div class="campo"><label>Per chi</label><p>${esc(x.per)}</p></div>
+        <div class="campo"><label>Come funziona</label><ul class="regole-setup">${x.regole.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>
+        <div class="numeri-setup">
+            <div><small>🔥 Hot</small><b>${x.hot}%</b></div>
+            <div><small>⚡ Lightning</small><b>${x.ln ? `fino a ${euroTondo(x.ln)}` : '—'}</b></div>
+            <div><small>€ Euro</small><b>${x.fiatMax ? 'max ' : ''}${fmtMesi(x.mesi)}</b></div>
+        </div>
+        ${st.btcTot > 0 && st.prezzo ? `<p class="nota">Con i tuoi ${euroTondo(st.btcTot * st.prezzo)} in bitcoin: ❄ ${euroTondo(st.btcTot * st.prezzo * (1 - x.hot / 100) - lnOggi)} · 🔥 ${euroTondo(st.btcTot * st.prezzo * x.hot / 100)} · ⚡ ${euroTondo(lnOggi)}${st.spesa ? ` · in euro ${euroTondo(st.spesa * x.mesi)}` : ''}.</p>` : ''}
+        <div class="avviso-finanza"><b>!</b><span>${NON_CONSIGLIO} Nessuno ti dice cosa comprare o vendere: l’app mostra solo come starebbero i tuoi fondi con questo schema.</span></div>
+        ${st.cfg.setup === k ? '<p class="nota equilibrio">✓ È il setup in uso.</p>' : `<button class="bottone btc" data-az="usa-setup" data-val="${k}">Usa questo setup</button>`}
+        <button class="bottone secondario" data-az="scegli-setup">Tutti i setup</button>
+    `;
+}
+
+function foglioSync() {
+    return `
+        <h2>Sincronizzazione e backup<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
+        <p class="nota">Bilancio non ha un server: i movimenti sono file CSV nella cartella <code>${esc(A.cartella() || '—')}</code>. Che non si perdano dipende da come la sincronizzi.</p>
+        ${guidaSync(true)}
+        <button class="bottone secondario" data-az="cartella">Cambia cartella</button>
     `;
 }
 
@@ -1499,7 +1780,9 @@ function foglioMenu() {
         <h2>Bilancio</h2>
         <button class="voce-menu" data-az="regole"><b>⇄</b><span>Regole delle categorie<small>${regole().length} regole${sospese ? ` · ${sospese} da classificare` : ''}</small></span></button>
         <button class="voce-menu" data-az="importa"><b>⇩</b><span>Importa movimenti<small>BBVA, Phoenix, BlueWallet…</small></span></button>
-        <button class="voce-menu" data-az="cfg-piramide"><b>△</b><span>Piramide dei fondi<small>Obiettivi, posizione degli euro, cuscinetto</small></span></button>
+        <button class="voce-menu" data-az="scegli-setup"><b>△</b><span>Setup della piramide<small>${esc(setupDi(configPiramide().setup).nome)}${configPiramide().setup ? '' : ': da scegliere'}</small></span></button>
+        <button class="voce-menu" data-az="sync"><b>🔄</b><span>Sincronizzazione e backup<small>Syncthing o cloud: dove stanno i dati</small></span></button>
+        <button class="voce-menu" data-az="tutorial"><b>?</b><span>Tutorial<small>Il giro guidato dell’app</small></span></button>
         <button class="voce-menu" data-az="impostazioni"><b>⚙</b><span>Impostazioni</span></button>
         <button class="voce-menu" data-az="ricarica"><b>↻</b><span>Rileggi i file</span></button>
     `;
@@ -1867,22 +2150,33 @@ const azioni = {
     strato: v => { S.strato = v; },
     'cfg-piramide': () => {
         const c = configPiramide();
-        apriFoglio({ tipo: 'piramide', bozza: { ...c.obiettivi, fiat: c.fiat, mesi: c.mesi } });
+        apriFoglio({ tipo: 'piramide', bozza: { hot: c.hot, ln: c.ln, fiat: c.fiat, mesi: c.mesi, fiatMax: c.fiatMax } });
         return false;
     },
-    'preset-piramide': v => { leggiBozza(); Object.assign(S.foglio.bozza, PRESET[v]); S.foglio.errore = ''; disegnaFoglio(); return false; },
+    'scegli-setup': () => { apriFoglio({ tipo: 'setup' }); return false; },
+    'info-setup': v => { apriFoglio({ tipo: 'infosetup', setup: v }); return false; },
+    'usa-setup': v => {
+        try { usaSetup(v); } catch (e) { avvisa(e.message); return false; }
+        chiudiFoglio();
+        avvisa(`Setup: ${SETUP[v].nome}`);
+        return true;
+    },
+    sync: () => { apriFoglio({ tipo: 'sync' }); return false; },
+    tutorial: () => { avviaTour(); return false; },
+    'tour-avanti': () => { avantiTour(); return false; },
+    'tour-salta': () => { chiudiTour(); return false; },
     'fiat-pos': v => { leggiBozza(); S.foglio.bozza.fiat = v; disegnaFoglio(); return false; },
     'mesi-cuscinetto': v => { leggiBozza(); S.foglio.bozza.mesi = Number(v); disegnaFoglio(); return false; },
+    'fiat-max': v => { leggiBozza(); S.foglio.bozza.fiatMax = !!v; disegnaFoglio(); return false; },
     'salva-piramide': () => {
         leggiBozza();
         const f = S.foglio, b = f.bozza;
-        const obiettivi = Object.fromEntries(ORDINE_BTC.map(k => [k, Number(String(b[k]).replace(',', '.'))]));
-        if (Object.values(obiettivi).some(x => !Number.isFinite(x) || x < 0)) { f.errore = 'Ogni obiettivo è una percentuale da 0 a 100'; disegnaFoglio(); return false; }
-        const somma = Object.values(obiettivi).reduce((t, x) => t + x, 0);
-        if (Math.abs(somma - 100) > 0.5) { f.errore = `Gli obiettivi sommano a ${somma}%, non a 100%`; disegnaFoglio(); return false; }
-        try { salvaConfigPiramide({ obiettivi, fiat: b.fiat, mesi: b.mesi }); } catch (e) { f.errore = e.message; disegnaFoglio(); return false; }
+        const hot = Number(String(b.hot).replace(',', '.')), ln = Number(String(b.ln).replace(',', '.'));
+        if (!Number.isFinite(hot) || hot < 0 || hot > HOT_MAX) { f.errore = `L’hot wallet va da 0 a ${HOT_MAX}%`; disegnaFoglio(); return false; }
+        if (!Number.isFinite(ln) || ln < 0 || ln > LN_MAX) { f.errore = `Lightning va da 0 a ${LN_MAX} €`; disegnaFoglio(); return false; }
+        try { salvaConfigPiramide({ setup: 'mio', hot, ln, fiat: b.fiat, mesi: b.mesi, fiatMax: !!b.fiatMax }); } catch (e) { f.errore = e.message; disegnaFoglio(); return false; }
         chiudiFoglio();
-        avvisa('Piramide aggiornata');
+        avvisa('Piramide personalizzata');
         return true;
     },
     'livello-wallet': (v, el) => { apriFoglio({ tipo: 'livello', persona: el.dataset.persona, nome: v }); return false; },
@@ -1992,7 +2286,13 @@ const azioni = {
     permesso: () => { A.chiediPermesso(); return false; },
     cartella: () => { A.scegliCartella(); return false; },
     io: v => { pref.io = v; },
-    inizia: () => { scriviLocale('bilancio.avviato', true); carica(); aggiornaPrezzo(); },
+    inizia: () => {
+        scriviLocale('bilancio.avviato', true);
+        carica();
+        aggiornaPrezzo();
+        S.tab = 'home';
+        if (!leggiLocale('bilancio.tour', false)) setTimeout(avviaTour, 300);
+    },
 };
 
 document.addEventListener('click', e => {
@@ -2083,6 +2383,7 @@ document.addEventListener('change', e => {
 
 // Called by the activity.
 window.indietro = () => {
+    if (tour) { chiudiTour(); return true; }
     if (S.foglio) { chiudiFoglio(); return true; }
     if (pronto() && S.conto) { S.conto = ''; S.persona = ''; disegna(); return true; }
     if (pronto() && S.tab === 'bollette' && S.bolTipo) { S.bolTipo = ''; disegna(); return true; }
@@ -2116,3 +2417,5 @@ window.cartellaScelta = percorso => {
 if (A.permesso() && A.cartella()) carica();
 disegna();
 if (pronto()) aggiornaPrezzo();
+// Whoever updates from a version without the tutorial sees it once too.
+if (pronto() && !leggiLocale('bilancio.tour', false)) setTimeout(avviaTour, 400);
