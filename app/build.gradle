@@ -14,6 +14,27 @@ android {
         versionName "1.9"
     }
 
+    // The release key lives outside the repo; without it the release build stays unsigned.
+    def releaseProps = new File(System.getProperty('user.home'), '.android/bilancio-release.properties')
+    signingConfigs {
+        if (releaseProps.exists()) {
+            release {
+                def p = new Properties()
+                releaseProps.withInputStream { p.load(it) }
+                storeFile file(p.storeFile)
+                storePassword p.storePassword
+                keyAlias p.keyAlias
+                keyPassword p.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (releaseProps.exists()) signingConfig signingConfigs.release
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

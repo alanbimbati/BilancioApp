@@ -1,0 +1,16 @@
+release_source: ./app/build/outputs/apk/release/app-release.apk
+metadata_sources: []
+
+name: Bilancio
+summary: Personal budget built around the Ortix funds pyramid, euro and bitcoin
+description: |
+  Bilancio keeps euro accounts and bitcoin wallets in plain CSV files in a folder you choose
+  (sync it with Syncthing, no cloud, no account).
+
+  The home screen draws your **funds pyramid** from the real amounts: Lightning at the tip,
+  hot wallet, cold wallet and euro, each floor as big as its share of your wealth.
+  It suggests a profile from how your funds are spread and shows how they should move.
+
+  Not financial advice: the profiles are example setups. More on https://ortix.vercel.app/
+website: https://ortix.vercel.app/
+tags: [finance, bitcoin, budget]
