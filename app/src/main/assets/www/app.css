@@ -431,3 +431,10 @@ p.avviso-finanza { display: block; }
 .tabella-confronto span small { color: var(--tenue); font-size: 0.68rem; }
 .tabella-confronto > b { text-align: right; }
 .tabella-confronto i { width: 0.6rem; height: 0.6rem; border-radius: 2px; flex: none; }
+
+/* Links to the Ortix articles */
+.ortix { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.6rem 0 0.75rem; }
+.ortix small { flex-basis: 100%; color: var(--tenue); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.ortix a { padding: 0.35rem 0.7rem; border-radius: 999px; border: 1px solid var(--superficie-2); background: var(--superficie); color: var(--btc); font-size: 0.8rem; font-weight: 600; text-decoration: none; }
+.ortix a:active { background: var(--superficie-2); }
+a.voce-menu { color: inherit; text-decoration: none; }

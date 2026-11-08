@@ -867,12 +867,39 @@ function vistaBitcoin() {
 
 // Top to bottom: the less it holds, the closer to the tip and the easier to spend.
 const STRATI = {
-    ln: { nome: 'Lightning', icona: '⚡', colore: '#facc15', ruolo: 'Punta · spese di tutti i giorni', uso: 'Caffè, spesa, micropagamenti', sicurezza: 'Bassa: pochi fondi, ricaricati dal livello hot', esempi: 'Phoenix, Breez, Zeus', concetto: 'Azione immediata' },
-    hot: { nome: 'Hot wallet', icona: '🔥', colore: '#f97316', ruolo: 'Mezzo · medio termine', uso: 'Risparmi da usare entro mesi, acquisti importanti', sicurezza: 'Media: telefono o PC, passphrase e backup cifrato', esempi: 'BlueWallet, Sparrow, Nunchuk', concetto: 'Sovranità operativa' },
-    cold: { nome: 'Cold wallet', icona: '❄', colore: '#22d3ee', ruolo: 'Base · il patrimonio', uso: 'HODL, risparmio di lungo periodo, eredità', sicurezza: 'Massima: chiavi offline, seed su acciaio', esempi: 'SeedSigner, Coldcard, Airgap Vault', concetto: 'Asset immutabile' },
-    fiat: { nome: 'Euro', icona: '€', colore: '#3b82f6', ruolo: 'Liquidità in euro', uso: 'Bollette, spese correnti, cuscinetto per le emergenze', sicurezza: 'In custodia della banca', esempi: 'Conti correnti, contanti', concetto: 'Cuscinetto' },
+    ln: { articoli: ['ln', 'canali'], nome: 'Lightning', icona: '⚡', colore: '#facc15', ruolo: 'Punta · spese di tutti i giorni', uso: 'Caffè, spesa, micropagamenti', sicurezza: 'Bassa: pochi fondi, ricaricati dal livello hot', esempi: 'Phoenix, Breez, Zeus', concetto: 'Azione immediata' },
+    hot: { articoli: ['hot', 'wallet'], nome: 'Hot wallet', icona: '🔥', colore: '#f97316', ruolo: 'Mezzo · medio termine', uso: 'Risparmi da usare entro mesi, acquisti importanti', sicurezza: 'Media: telefono o PC, passphrase e backup cifrato', esempi: 'BlueWallet, Sparrow, Nunchuk', concetto: 'Sovranità operativa' },
+    cold: { articoli: ['cold', 'seed'], nome: 'Cold wallet', icona: '❄', colore: '#22d3ee', ruolo: 'Base · il patrimonio', uso: 'HODL, risparmio di lungo periodo, eredità', sicurezza: 'Massima: chiavi offline, seed su acciaio', esempi: 'SeedSigner, Coldcard, Airgap Vault', concetto: 'Asset immutabile' },
+    fiat: { articoli: ['cuscinetto'], nome: 'Euro', icona: '€', colore: '#3b82f6', ruolo: 'Liquidità in euro', uso: 'Bollette, spese correnti, cuscinetto per le emergenze', sicurezza: 'In custodia della banca', esempi: 'Conti correnti, contanti', concetto: 'Cuscinetto' },
 };
 const ORDINE_BTC = ['ln', 'hot', 'cold'];
+
+// The app says the minimum and sends to the Ortix articles for the rest.
+const ORTIX = 'https://ortix.vercel.app/';
+const ARTICOLI = {
+    piramide: ['La piramide dei fondi', 'bitcoin/guide-e-consigli/gestire-i-bitcoin-in-modo-intelligente'],
+    profili: ['I profili della piramide', 'bitcoin/guide-e-consigli/i-profili-della-piramide-dei-fondi'],
+    cold: ['Cold wallet', 'bitcoin/definizioni/blockchain/cold-wallet'],
+    seed: ['Seed phrase', 'bitcoin/definizioni/blockchain/seed-phrase'],
+    hot: ['Hot wallet', 'bitcoin/definizioni/blockchain/hot-wallet'],
+    wallet: ['Scegliere il wallet giusto', 'bitcoin/guide-e-consigli/3-come-scegliere-il-wallet-giusto-per-te'],
+    ln: ['Lightning Network', 'bitcoin/lightning-network/lightning-network'],
+    canali: ['Canali di pagamento', 'bitcoin/definizioni/lightning/canale-di-pagamento'],
+    lnSovrano: ['Sovrano su Lightning', 'bitcoin/lightning-network/00-come-essere-sovrano-su-ln-step-by-step'],
+    cuscinetto: ['Il cuscinetto in euro', 'bitcoin/guide-e-consigli/il-cuscinetto-in-euro'],
+    pac: ['Il PAC: evita il trading', 'bitcoin/filosofia/evita-il-trading'],
+    iniziare: ['Bitcoin: dove iniziare', 'bitcoin/bitcoin-dove-iniziare'],
+    morto: ['Bitcoin è morto (e risorto)', 'bitcoin/filosofia/bitcoin-e-morto-e-risorto'],
+    vivere: ['Vivere in Bitcoin', 'bitcoin/guide-e-consigli/vivere-in-bitcoin'],
+    syncthing: ['Syncthing', 'ortix/storage/syncthing'],
+    backup: ['Backup sovrano con Syncthing', 'ortix/storage/backup-sovrano-con-3-dispositivi-e-syncthing'],
+    cloud: ['Perché non un cloud centralizzato', 'ortix/storage/perche-non-dovresti-usare-un-cloud-centralizzato'],
+};
+
+function approfondisci(...chiavi) {
+    return `<div class="ortix"><small>📖 Approfondisci su Ortix</small>${chiavi.map(k =>
+        `<a href="${ORTIX}${ARTICOLI[k][1]}/" target="_blank" rel="noopener">${esc(ARTICOLI[k][0])} ›</a>`).join('')}</div>`;
+}
 const TUTTI_STRATI = ['ln', 'hot', 'cold', 'fiat'];
 // Past these a layer stops doing its job: a hot wallet is money at risk, and Lightning channels holding
 // more than this are a chore to keep balanced. Lightning also never takes more than a tenth of a small stack.
@@ -881,6 +908,7 @@ const NON_CONSIGLIO = 'Non è un consiglio finanziario: è un esempio di come or
 
 const SETUP = {
     nocoiner: {
+        articoli: ['iniziare', 'cuscinetto'],
         nome: 'No coiner', icona: '🏦', hot: 0, ln: 0, mesi: 3, fiatMax: false, soloFiat: true,
         breve: 'Nessun bitcoin: la piramide è tutta in euro.',
         per: 'Chi non ha bitcoin, o non li ha ancora registrati.',
@@ -889,6 +917,7 @@ const SETUP = {
             'Per cominciare con i bitcoin c’è il profilo 🌱 Alle prime armi: un PAC verso un cold wallet.'],
     },
     inizio: {
+        articoli: ['pac', 'cold'],
         nome: 'Alle prime armi', icona: '🌱', hot: 0, ln: 0, mesi: 3, fiatMax: false,
         breve: 'Un PAC verso il cold wallet: si costruisce la base, senza spendere.',
         per: 'Chi ha appena iniziato: meno di sei mesi di acquisti, o pochi bitcoin rispetto agli euro.',
@@ -898,6 +927,7 @@ const SETUP = {
             'Gli altri piani della piramide arrivano dopo, quando la base è solida.'],
     },
     ortix: {
+        articoli: ['piramide', 'hot'],
         nome: 'Piramide Ortix', icona: '△', hot: 10, ln: 300, mesi: 3, fiatMax: false,
         breve: 'La piramide classica: base cold, poco hot, una punta Lightning per spendere.',
         per: 'Chi accumula da un po’ e vuole tenere i fondi in ordine.',
@@ -907,6 +937,7 @@ const SETUP = {
             'Tre mesi di spese in euro.'],
     },
     negativo: {
+        articoli: ['morto', 'pac'],
         nome: 'In perdita', icona: '🧊', hot: 5, ln: 100, mesi: 6, fiatMax: false,
         breve: 'Sotto il prezzo medio: si continua ad accumulare con gli euro che avanzano, spendendo poco.',
         per: 'Chi oggi ha bitcoin che valgono meno di quanto li ha pagati.',
@@ -916,6 +947,7 @@ const SETUP = {
             'Hot e Lightning al minimo.'],
     },
     massimalista: {
+        articoli: ['vivere', 'cuscinetto'],
         nome: 'Massimalista', icona: '🟠', hot: 5, ln: 1000, mesi: 1, fiatMax: true,
         breve: 'In euro al massimo un mese di spese, tutto il resto in bitcoin.',
         per: 'Chi ha scelto di risparmiare solo in bitcoin.',
@@ -925,6 +957,7 @@ const SETUP = {
             'Hot wallet al 5%.'],
     },
     positivo: {
+        articoli: ['vivere', 'lnSovrano'],
         nome: 'Vivere in bitcoin', icona: '🚀', hot: 10, ln: 1000, mesi: 2, fiatMax: false,
         breve: 'Molto in guadagno: la piramide completa, spendendo in sats dalla punta.',
         per: 'Chi ha bitcoin che valgono almeno il doppio di quanto li ha pagati.',
@@ -1300,6 +1333,7 @@ function vistaHome() {
         ${consigli.length ? consigli.map(c => `<button class="consiglio" data-az="${c.az}" data-val="${esc(c.val)}"><b>${c.icona}</b><span>${c.testo}</span></button>`).join('')
             : '<p class="nota equilibrio">✓ La piramide rispetta gli obiettivi del profilo. Niente da spostare.</p>'}
         <p class="nota piccola">${NON_CONSIGLIO}</p>
+        ${approfondisci('piramide', 'profili')}
         <div class="sezione" data-tour="conti"><span>Conti e wallet</span><button class="link" data-az="importa">Importa…</button></div>
         <div class="scheda">${elencoConti(st)}</div>
         ${b ? `<div class="sezione"><span>Bitcoin</span><button class="link" data-az="tab" data-val="bitcoin">Movimenti ›</button></div>
@@ -1401,7 +1435,7 @@ function chiudiTour() {
 // ---------- where the data lives ----------
 
 // The app has no server, so whether the files survive a lost phone depends on how the folder is synced.
-function guidaSync(aperta = false) {
+function guidaSync() {
     return `<div class="opzioni-sync">
         <div class="opzione consigliata"><b>🔄 Syncthing</b><small>consigliato</small>
             <p>Copia la cartella tra telefono, PC e Raspberry direttamente, senza passare da un cloud. Gratis e open source.</p></div>
@@ -1410,13 +1444,8 @@ function guidaSync(aperta = false) {
         <div class="opzione"><b>📱 Solo sul telefono</b>
             <p>Funziona, ma se perdi o cambi il telefono perdi anche i dati.</p></div>
     </div>
-    <details class="come-sync"${aperta ? ' open' : ''}><summary>Come si fa con Syncthing</summary><ol>
-        <li>Installa <b>Syncthing-Fork</b> sul telefono (F-Droid o Play Store) e <b>Syncthing</b> sul PC (syncthing.net).</li>
-        <li>Collega i due dispositivi: sul PC «Aggiungi dispositivo» e inquadra il QR del telefono.</li>
-        <li>Sul telefono crea la cartella <code>Documenti/Casa/Bilancio/dati</code> e condividila col PC.</li>
-        <li>Torna qui e scegli quella cartella. Ogni movimento salvato arriva da solo sugli altri dispositivi.</li>
-        <li>Usa l’app da un dispositivo alla volta: se due modificano lo stesso anno prima di sincronizzarsi, Syncthing tiene due copie e l’app ti avvisa.</li>
-    </ol></details>`;
+    <p class="nota come-sync">Con Syncthing: installalo sul telefono e sul PC, condividi la cartella <code>Documenti/Casa/Bilancio/dati</code> e sceglila qui. Usa l’app da un dispositivo alla volta.</p>
+    ${approfondisci('syncthing', 'backup', 'cloud')}`;
 }
 
 // ---------- bills ----------
@@ -1823,6 +1852,7 @@ function foglioPiano() {
             </dl>
             ${wallet || '<p class="nota vuota">Nessun portafoglio in questo livello.</p>'}
             <button class="bottone secondario" data-az="nuovo-portafoglio" data-val="${k}">+ ${k === 'fiat' ? 'Conto in €' : `Portafoglio ${d.icona}`}</button>
+            ${approfondisci(...d.articoli)}
         </div>
     `;
 }
@@ -1865,6 +1895,7 @@ function foglioInfoSetup(f) {
             <div><small>⚡ Lightning</small><b>${x.ln ? `fino a ${euroTondo(x.ln)}` : '—'}</b></div>
             <div><small>€ Euro</small><b>${x.soloFiat ? 'tutto' : `${x.fiatMax ? 'max ' : ''}${fmtMesi(x.mesi)}`}</b></div>
         </div>` : ''}
+        ${approfondisci(...(x.articoli || []), 'profili')}
         <div class="avviso-finanza"><b>!</b><span>${NON_CONSIGLIO} Nessuno ti dice cosa comprare o vendere: l’app mostra solo come starebbero i tuoi fondi con questo schema.</span></div>
         <button class="bottone secondario" data-az="scegli-setup">Tutti i profili</button>
     `;
@@ -1874,7 +1905,7 @@ function foglioSync() {
     return `
         <h2>Sincronizzazione e backup<button class="icona" data-az="chiudi" aria-label="Chiudi">✕</button></h2>
         <p class="nota">Bilancio non ha un server: i movimenti sono file CSV nella cartella <code>${esc(A.cartella() || '—')}</code>. Che non si perdano dipende da come la sincronizzi.</p>
-        ${guidaSync(true)}
+        ${guidaSync()}
         <button class="bottone secondario" data-az="cartella">Cambia cartella</button>
     `;
 }
@@ -1902,6 +1933,7 @@ function foglioMenu() {
         <button class="voce-menu" data-az="importa"><b>⇩</b><span>Importa movimenti<small>BBVA, Phoenix, BlueWallet…</small></span></button>
         <button class="voce-menu" data-az="scegli-setup"><b>△</b><span>Profilo della piramide<small>${esc(setupDi(statoPiramide().cfg.setup).nome)}${configPiramide() ? '' : ' (automatico)'}</small></span></button>
         <button class="voce-menu" data-az="sync"><b>🔄</b><span>Sincronizzazione e backup<small>Syncthing o cloud: dove stanno i dati</small></span></button>
+        <a class="voce-menu" href="${ORTIX}" target="_blank" rel="noopener"><b>📖</b><span>Articoli di Ortix<small>Piramide, wallet, Lightning, Syncthing</small></span></a>
         <button class="voce-menu" data-az="tutorial"><b>?</b><span>Tutorial<small>Il giro guidato dell’app</small></span></button>
         <button class="voce-menu" data-az="impostazioni"><b>⚙</b><span>Impostazioni</span></button>
         <button class="voce-menu" data-az="ricarica"><b>↻</b><span>Rileggi i file</span></button>
