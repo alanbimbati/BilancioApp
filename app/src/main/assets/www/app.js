@@ -900,6 +900,12 @@ function approfondisci(...chiavi) {
     return `<div class="ortix"><small>📖 Approfondisci su Ortix</small>${chiavi.map(k =>
         `<a href="${ORTIX}${ARTICOLI[k][1]}/" target="_blank" rel="noopener">${esc(ARTICOLI[k][0])} ›</a>`).join('')}</div>`;
 }
+const BARATTOLO_P2P = 'https://barattolo.store/p2p';
+
+function acquistaP2P() {
+    return `<a class="bottone btc acquista-p2p" href="${BARATTOLO_P2P}" target="_blank" rel="noopener">🏺 Acquista Bitcoin P2P</a>
+        <p class="nota piccola">Su Barattolo, senza exchange: euro e sats passano direttamente tra persone.</p>`;
+}
 const TUTTI_STRATI = ['ln', 'hot', 'cold', 'fiat'];
 // Past these a layer stops doing its job: a hot wallet is money at risk, and Lightning channels holding
 // more than this are a chore to keep balanced. Lightning also never takes more than a tenth of a small stack.
@@ -1347,6 +1353,7 @@ function vistaHome() {
             ${[['mese', 'Mese'], ['trimestre', 'Trimestre'], ['anno', 'Anno']].map(([k, n]) => `<button class="${S.btcPeriodo === k ? 'attivo' : ''}" data-az="btc-periodo" data-val="${k}">${n}</button>`).join('')}
         </div>
         ${grafoBolle(b.acquisti, b.p, b.medio)}` : ''}
+        ${acquistaP2P()}
         <div class="sezione"><span>${nomeMese(mese)}</span><button class="link" data-az="tab" data-val="movimenti">Movimenti ›</button></div>
         <div class="riassunto">
             <div class="scheda"><small>Entrate</small><strong class="positivo">${euroTondo(entrate)}</strong></div>

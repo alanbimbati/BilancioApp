@@ -181,6 +181,8 @@ button { cursor: pointer; border: none; background: none; }
 .bottone { width: 100%; padding: 0.9rem; border-radius: 0.8rem; font-weight: 700; background: var(--fiat); color: white; margin-top: 0.4rem; }
 .bottone.btc { background: var(--btc); color: #111; }
 .bottone.secondario { background: var(--superficie-2); color: var(--testo); }
+a.bottone { display: block; text-align: center; text-decoration: none; box-sizing: border-box; }
+.acquista-p2p { margin-top: 1rem; }
 .bottone.pericolo { background: transparent; color: var(--uscita); border: 1px solid rgba(239, 68, 68, 0.4); }
 .bottone:disabled { opacity: 0.5; }
 .nota { color: var(--tenue); font-size: 0.85rem; margin: 0.25rem 0 0.9rem; }
