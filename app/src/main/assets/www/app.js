@@ -3,7 +3,10 @@
 // portfolio with a portafoglio.json saying whether it counts euro or bitcoin. The web app reads the same files
 // and Syncthing carries every change to the PC and the Pi. Nothing here needs a network except the BTC price.
 
-const A = window.Archivio;
+const ARCHIVIO = window.Archivio;
+// The demo swaps in an archive held in memory, so it never touches the real folder.
+let A = ARCHIVIO;
+let demo = null; // { fs, mtime, locale } while the demo is open
 
 const COLONNE = {
     fiat: ['id', 'data', 'importo', 'persona', 'conto', 'tipologia', 'categoria', 'descrizione'],
@@ -56,9 +59,11 @@ function giorno(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 function leggiLocale(k, def) {
+    if (demo?.locale.has(k)) return demo.locale.get(k);
     try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch { return def; }
 }
 function scriviLocale(k, v) {
+    if (demo) { demo.locale.set(k, v); return; }
     try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* nothing to remember then */ }
 }
 function esc(s) {
@@ -165,6 +170,165 @@ function aCSV(tipo, righe) {
     };
     const ordinate = [...righe].sort((a, b) => a.data.localeCompare(b.data));
     return [COLONNE[tipo].join(','), ...ordinate.map(m => COLONNE[tipo].map(k => cella(valore(m, k))).join(','))].join('\n') + '\n';
+}
+
+// ---------- demo ----------
+
+// Three made-up people whose funds make the app suggest a different profile, and different moves, for each.
+const DEMO_PREZZO = 90000;
+const DEMO_PERSONE = [
+    { nome: 'Giulia', setup: 'nocoiner', articoli: ['iniziare', 'cuscinetto'],
+        storia: 'Stipendio fisso e tutti i risparmi in banca, nessun bitcoin: la piramide ha un piano solo, gli euro.' },
+    { nome: 'Luca', setup: 'ortix', articoli: ['hot', 'piramide'],
+        storia: 'Ha accumulato con un PAC per un anno e mezzo, ma tiene troppi bitcoin sull’hot wallet del telefono e troppi euro fermi sul conto.' },
+    { nome: 'Marco', setup: 'positivo', articoli: ['vivere', 'ln'],
+        storia: 'Compra dal 2019, oggi i suoi bitcoin valgono molto più di quanto li ha pagati e paga in sats. Il suo wallet Lightning però è cresciuto ben oltre i 1.000 €.' },
+];
+// Rough BTC/EUR prices, straight lines in between: enough for believable purchases.
+const DEMO_STORICO = [['2019-01', 3500], ['2019-06', 9500], ['2020-03', 5500], ['2020-12', 20000], ['2021-04', 48000],
+    ['2021-07', 28000], ['2021-11', 57000], ['2022-06', 19000], ['2022-12', 16000], ['2023-12', 39000], ['2024-03', 63000],
+    ['2024-08', 54000], ['2024-12', 95000], ['2025-04', 75000], ['2025-10', 100000], ['2026-03', 80000], ['2026-11', DEMO_PREZZO]];
+
+function demoPrezzo(ym) {
+    const t = x => Number(x.slice(0, 4)) * 12 + Number(x.slice(5, 7));
+    if (t(ym) <= t(DEMO_STORICO[0][0])) return DEMO_STORICO[0][1];
+    for (let i = 1; i < DEMO_STORICO.length; i++) {
+        const [a, pa] = DEMO_STORICO[i - 1], [b, pb] = DEMO_STORICO[i];
+        if (t(ym) <= t(b)) return Math.round(pa + ((pb - pa) * (t(ym) - t(a))) / (t(b) - t(a)));
+    }
+    return DEMO_PREZZO;
+}
+
+function datiDemo() {
+    let seme = 7;
+    const caso = (min, max) => { seme = (seme * 16807) % 2147483647; return Math.round((min + ((seme - 1) / 2147483646) * (max - min)) * 100) / 100; };
+    const fs = {}, righe = {}, finoA = oggi();
+    let n = 0;
+    const riga = (persona, conto, data, valori) => {
+        if (data > finoA) return;
+        (righe[`${persona}/${conto}/${data.slice(0, 4)}.csv`] ||= []).push([`demo${++n}`, data, ...valori]);
+    };
+    const euro = (persona, conto, data, importo, tipologia, categoria, descrizione) =>
+        riga(persona, conto, data, [importo.toFixed(2), persona, conto, tipologia, categoria, descrizione]);
+    const sats = (persona, conto, data, eur, btc, descrizione) =>
+        riga(persona, conto, data, [eur.toFixed(2), btc.toFixed(8), eur > 0 ? demoPrezzo(data.slice(0, 7)) : '', persona, conto, descrizione]);
+    const portafoglio = (persona, nome, meta) => { fs[`${persona}/${nome}/portafoglio.json`] = JSON.stringify({ nome, ...meta }); };
+    const ultimi = k => Array.from({ length: k }, (_, i) => spostaMese(finoA.slice(0, 7), i - k + 1));
+    const mesiTra = (da, a) => { const out = []; for (let m = da; m <= a; m = spostaMese(m, 1)) out.push(m); return out; };
+
+    // Twelve months of an ordinary life on a current account, the first day bringing the starting balance.
+    const vita = (persona, conto, saldo, stipendio, affitto) => ultimi(13).forEach((ym, i) => {
+        if (!i) euro(persona, conto, `${ym}-01`, saldo, 'Saldo iniziale', 'Giroconto', 'saldo di partenza');
+        euro(persona, conto, `${ym}-02`, -affitto, 'Affitto', 'Casa', 'affitto');
+        [['04', 'supermercato'], ['11', 'discount'], ['18', 'supermercato'], ['25', 'mercato']].forEach(([g, d]) => euro(persona, conto, `${ym}-${g}`, -caso(60, 95), 'Spesa', 'Cibo', d));
+        euro(persona, conto, `${ym}-09`, -caso(40, 75), 'Bolletta luce', 'Casa', 'luce');
+        if (Number(ym.slice(5)) % 2) euro(persona, conto, `${ym}-16`, -caso(30, 90), 'Bolletta gas', 'Casa', 'gas');
+        euro(persona, conto, `${ym}-14`, -caso(20, 60), 'Bar', 'Svago', 'aperitivo');
+        euro(persona, conto, `${ym}-21`, -caso(40, 70), 'Carburante', 'Trasporti', 'benzina');
+        euro(persona, conto, `${ym}-27`, stipendio, 'Stipendio', 'Entrate', 'stipendio');
+    });
+
+    portafoglio('Giulia', 'Conto corrente', { valuta: 'EUR' });
+    portafoglio('Giulia', 'Conto deposito', { valuta: 'EUR' });
+    vita('Giulia', 'Conto corrente', 3000, 1750, 600);
+    euro('Giulia', 'Conto deposito', `${ultimi(13)[0]}-01`, 5000, 'Saldo iniziale', 'Giroconto', 'saldo di partenza');
+
+    portafoglio('Luca', 'Conto corrente', { valuta: 'EUR' });
+    portafoglio('Luca', 'Coldcard', { valuta: 'BTC', custodia: 'cold' });
+    portafoglio('Luca', 'BlueWallet', { valuta: 'BTC', custodia: 'hot' });
+    portafoglio('Luca', 'Phoenix', { valuta: 'BTC', rete: 'LN' });
+    vita('Luca', 'Conto corrente', 1000, 2100, 850);
+    mesiTra('2024-01', '2025-06').forEach(ym => sats('Luca', 'Coldcard', `${ym}-05`, 200, 200 / demoPrezzo(ym), 'PAC'));
+    mesiTra('2025-01', '2025-06').forEach(ym => sats('Luca', 'BlueWallet', `${ym}-15`, 250, 250 / demoPrezzo(ym), 'acquisto'));
+    sats('Luca', 'BlueWallet', '2025-07-01', 0, -0.002, 'ricarica Lightning');
+    sats('Luca', 'Phoenix', '2025-07-01', 0, 0.002, 'ricarica da BlueWallet');
+    sats('Luca', 'Phoenix', '2025-09-12', 0, -0.0003, 'pizza');
+    sats('Luca', 'Phoenix', '2026-01-20', 0, -0.0003, 'libro');
+
+    portafoglio('Marco', 'Conto corrente', { valuta: 'EUR' });
+    portafoglio('Marco', 'Coldcard', { valuta: 'BTC', custodia: 'cold' });
+    portafoglio('Marco', 'Sparrow', { valuta: 'BTC', custodia: 'hot' });
+    portafoglio('Marco', 'Phoenix', { valuta: 'BTC', rete: 'LN' });
+    vita('Marco', 'Conto corrente', 2400, 2400, 900);
+    mesiTra('2019-01', '2021-12').forEach(ym => sats('Marco', 'Coldcard', `${ym}-05`, 300, 300 / demoPrezzo(ym), 'PAC'));
+    ultimi(13).forEach(ym => {
+        euro('Marco', 'Conto corrente', `${ym}-28`, -900, 'Bitcoin', 'Investimento', 'PAC bitcoin');
+        sats('Marco', 'Coldcard', `${ym}-28`, 900, 900 / demoPrezzo(ym), 'PAC');
+    });
+    sats('Marco', 'Coldcard', '2024-05-10', 0, -0.16, 'verso Sparrow');
+    sats('Marco', 'Sparrow', '2024-05-10', 0, 0.16, 'da Coldcard');
+    sats('Marco', 'Sparrow', '2025-02-01', 0, -0.052, 'ricarica Lightning');
+    sats('Marco', 'Phoenix', '2025-02-01', 0, 0.052, 'ricarica da Sparrow');
+    ultimi(6).forEach((ym, i) => sats('Marco', 'Phoenix', `${ym}-${10 + i}`, 0, -0.0012, ['spesa al mercato', 'cena', 'carta regalo', 'barbiere', 'pizza', 'caffè'][i]));
+
+    const testa = { fiat: COLONNE.fiat.join(','), bitcoin: COLONNE.bitcoin.join(',') };
+    for (const [k, r] of Object.entries(righe)) {
+        const meta = JSON.parse(fs[`${k.split('/').slice(0, 2).join('/')}/portafoglio.json`]);
+        fs[k] = [testa[VALUTA[meta.valuta]], ...r.sort((a, b) => a[1].localeCompare(b[1])).map(x => x.join(','))].join('\n') + '\n';
+    }
+    return fs;
+}
+
+function archivioDemo(fs) {
+    const mtime = {};
+    let orologio = 1;
+    return {
+        cartella: () => 'Demo',
+        permesso: () => true,
+        chiediPermesso() {},
+        scegliCartella() { avvisa('Nella demo i dati sono di esempio: esci dalla demo per scegliere la tua cartella.'); },
+        impostaCartella() {},
+        elenco(sub) {
+            const pre = sub ? `${sub}/` : '', visti = new Map();
+            for (const k of Object.keys(fs)) {
+                if (!k.startsWith(pre)) continue;
+                const resto = k.slice(pre.length), i = resto.indexOf('/');
+                const nome = i < 0 ? resto : resto.slice(0, i);
+                visti.set(nome, { nome, dir: i >= 0, mtime: i < 0 ? mtime[k] || 1 : 0, size: i < 0 ? fs[k].length : 0 });
+            }
+            return JSON.stringify([...visti.values()]);
+        },
+        leggi: k => fs[k] ?? null,
+        scrivi(k, t) { fs[k] = t; mtime[k] = ++orologio; return ''; },
+    };
+}
+
+function entraDemo(persona = DEMO_PERSONE[0].nome) {
+    if (!demo) {
+        demo = { locale: new Map([['bilancio.avviato', true], ['bilancio.tour', true], ['bilancio.prezzo', { eur: DEMO_PREZZO, ts: Date.now() }]]) };
+        A = archivioDemo(datiDemo());
+        S.file = {};
+        S.prezzo = leggiLocale('bilancio.prezzo', null);
+        carica();
+    }
+    pref.io = persona;
+    Object.assign(S, { persona, conto: '', tab: 'home' });
+}
+
+function esciDemo() {
+    demo = null;
+    A = ARCHIVIO;
+    Object.assign(S, { file: {}, persona: '', conto: '', tab: 'home', portafogli: new Map(), conflitti: [], vecchioFormato: false });
+    S.prezzo = leggiLocale('bilancio.prezzo', null);
+    if (A.permesso() && A.cartella()) carica();
+    if (pronto()) aggiornaPrezzo();
+}
+
+function schedaDemo() {
+    const p = DEMO_PERSONE.find(x => x.nome === S.persona);
+    return `<div class="scheda demo">
+        <div class="chips">${DEMO_PERSONE.map(x => `<button class="chip btc${x === p ? ' attivo' : ''}" data-az="persona" data-val="${x.nome}">${SETUP[x.setup].icona} ${x.nome}</button>`).join('')}</div>
+        ${p ? `<p class="nota">${esc(p.storia)}</p>${approfondisci(...p.articoli)}` : ''}
+    </div>`;
+}
+
+function foglioDemo() {
+    return `
+        <h2>🎓 Demo</h2>
+        <p class="nota">Tre persone di esempio con i fondi divisi in modi diversi. Per ognuna l’app suggerisce un profilo della piramide e cosa spostare: un modo per imparare a gestire i bitcoin, non un consiglio finanziario.</p>
+        ${DEMO_PERSONE.map(p => `<button class="voce-menu" data-az="demo-persona" data-val="${p.nome}"><b>${SETUP[p.setup].icona}</b><span>${p.nome} · ${esc(SETUP[p.setup].nome)}<small>${esc(p.storia)}</small></span></button>`).join('')}
+        <p class="nota">Puoi aggiungere movimenti e provare i profili: resta tutto in memoria e sparisce quando esci dalla demo.</p>
+    `;
 }
 
 // ---------- portfolios and files ----------
@@ -303,6 +467,7 @@ function eliminaMovimento(m) {
 // ---------- BTC price, the one online thing ----------
 
 async function aggiornaPrezzo() {
+    if (demo) return;
     const prova = async (url, leggi) => {
         const r = await fetch(url, { cache: 'no-store' });
         if (!r.ok) throw new Error(r.status);
@@ -1323,7 +1488,7 @@ function vistaHome() {
             <strong class="patrimonio">${prezzo ? euroTondo(fiat + btcTot * prezzo) : btc(btcTot)}</strong>
             <span>${btc(btcTot)} · ${euroTondo(fiat)}</span>
         </div>
-        ${chipsPersone(true)}
+        ${demo ? schedaDemo() : chipsPersone(true)}
         ${primiPassi}
         ${schedaSetup(st)}
         <div class="scheda piramide" data-tour="piramide">
@@ -1577,6 +1742,8 @@ function vistaBenvenuto() {
     return `<div class="benvenuto">
         <h1>Bilancio</h1>
         <p class="nota">Entrate, uscite e bitcoin, con la piramide dei fondi di Ortix. Niente account e niente server: quattro passi e si parte.</p>
+        <button class="bottone secondario" data-az="demo">🎓 Prova prima la demo</button>
+        <p class="nota">Tre portafogli di esempio, per vedere come l’app suggerisce di gestire i bitcoin. Nessun dato tuo.</p>
         <div class="passo">
             <h3><span class="numero">1</span> Dove tenere i dati</h3>
             <p class="nota">I movimenti sono file CSV in una cartella del telefono, apribili anche con Excel. Perché non si perdano, quella cartella va sincronizzata con un altro dispositivo.</p>
@@ -1621,6 +1788,7 @@ function disegna() {
     const posizione = cerca ? document.activeElement.selectionStart : null;
     app.innerHTML = `
         <header class="testata">${S.tab === 'bitcoin' || S.tab === 'bollette' ? '<button class="icona" data-az="tab" data-val="home" aria-label="Indietro">‹</button>' : '<button class="icona" data-az="menu" aria-label="Menu">☰</button>'}<h1>${TITOLI[S.tab]}</h1></header>
+        ${demo ? '<div class="striscia-demo"><span>🎓 <b>Demo</b> · dati di esempio</span><button data-az="esci-demo">Esci</button></div>' : ''}
         ${S.conflitti.length ? `<div class="conflitto">⚠ Syncthing ha creato copie in conflitto: i movimenti che contengono non si vedono qui. Uniscile a mano dal PC e cancellale.<br><small>${S.conflitti.map(esc).join(', ')}</small></div>` : ''}
         ${S.vecchioFormato ? '<div class="conflitto">I dati in questa cartella sono ancora nel formato vecchio (fiat/ e bitcoin/). Aspetta che Syncthing porti le cartelle dei portafogli.</div>' : ''}
         <main class="contenuto">${viste[S.tab]()}</main>
@@ -1675,7 +1843,7 @@ function disegnaFoglio() {
     const f = S.foglio;
     const el = document.getElementById('foglio');
     if (!f) { el.innerHTML = ''; return; }
-    const fogli = { aggiungi: foglioAggiungi, piano: foglioPiano, setup: foglioSetup, infosetup: foglioInfoSetup, sync: foglioSync, piramide: foglioPiramide, livello: foglioLivello, menu: foglioMenu, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
+    const fogli = { aggiungi: foglioAggiungi, piano: foglioPiano, setup: foglioSetup, infosetup: foglioInfoSetup, sync: foglioSync, piramide: foglioPiramide, livello: foglioLivello, menu: foglioMenu, demo: foglioDemo, regole: foglioRegole, impostazioni: foglioImpostazioni, bitcoin: foglioBitcoin, fiat: foglioFiat, portafoglio: foglioPortafoglio, importa: foglioImporta };
     const forma = f.tipo === 'menu' ? 'pannello cassetto' : f.tipo === 'regole' ? 'pannello pieno' : 'pannello';
     el.innerHTML = `<div class="velo" data-az="chiudi"></div><div class="${forma}">${f.tipo === 'menu' ? '' : '<div class="maniglia"></div>'}${fogli[f.tipo](f)}</div>`;
 }
@@ -1939,6 +2107,8 @@ function foglioMenu() {
         <button class="voce-menu" data-az="regole"><b>⇄</b><span>Regole delle categorie<small>${regole().length} regole${sospese ? ` · ${sospese} da classificare` : ''}</small></span></button>
         <button class="voce-menu" data-az="importa"><b>⇩</b><span>Importa movimenti<small>BBVA, Phoenix, BlueWallet…</small></span></button>
         <button class="voce-menu" data-az="scegli-setup"><b>△</b><span>Profilo della piramide<small>${esc(setupDi(statoPiramide().cfg.setup).nome)}${configPiramide() ? '' : ' (automatico)'}</small></span></button>
+        ${demo ? '<button class="voce-menu" data-az="esci-demo"><b>🎓</b><span>Esci dalla demo<small>Torna ai tuoi dati</small></span></button>'
+            : '<button class="voce-menu" data-az="demo"><b>🎓</b><span>Demo<small>Tre portafogli di esempio per imparare</small></span></button>'}
         <button class="voce-menu" data-az="sync"><b>🔄</b><span>Sincronizzazione e backup<small>Syncthing o cloud: dove stanno i dati</small></span></button>
         <a class="voce-menu" href="${ORTIX}" target="_blank" rel="noopener"><b>📖</b><span>Articoli di Ortix<small>Piramide, wallet, Lightning, Syncthing</small></span></a>
         <button class="voce-menu" data-az="tutorial"><b>?</b><span>Tutorial<small>Il giro guidato dell’app</small></span></button>
@@ -2325,6 +2495,9 @@ const azioni = {
     },
     sync: () => { apriFoglio({ tipo: 'sync' }); return false; },
     tutorial: () => { avviaTour(); return false; },
+    demo: () => { entraDemo(); apriFoglio({ tipo: 'demo' }); },
+    'demo-persona': v => { entraDemo(v); chiudiFoglio(); window.scrollTo(0, 0); },
+    'esci-demo': () => { esciDemo(); chiudiFoglio(); avvisa('Demo chiusa'); },
     'tour-avanti': () => { avantiTour(); return false; },
     'tour-salta': () => { chiudiTour(); return false; },
     'mesi-cuscinetto': v => { leggiBozza(); S.foglio.bozza.mesi = Number(v); disegnaFoglio(); return false; },
