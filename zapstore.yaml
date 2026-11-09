@@ -1,3 +1,5 @@
+repository: https://github.com/alanbimbati/BilancioApp
+pubkey: npub1s44nhkgms8s8x5h6n6pcrjmzsp26mrvhur8thhhdulzjag2c6lds5c8fwh
 release_source: ./app/build/outputs/apk/release/app-release.apk
 metadata_sources: []
 
